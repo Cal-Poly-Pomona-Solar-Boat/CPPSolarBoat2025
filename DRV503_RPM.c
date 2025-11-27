@@ -60,7 +60,7 @@ static void MX_TIM2_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-DRV503_RPM Code by Verenize Sotelo
+
 /* USER CODE END 0 */
 
 /**
@@ -93,6 +93,10 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   /* USER CODE BEGIN 2 */
+  /* USER CODE BEGIN 2 */
+  MX_TIM2_Init();
+  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
+  /* USER CODE END 2 */
 
   /* USER CODE END 2 */
 
@@ -124,6 +128,35 @@ int main(void)
   }
 
   /* USER CODE END 3 */
+}
+static void MX_TIM2_Init(void)
+{
+    TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+    TIM_MasterConfigTypeDef sMasterConfig = {0};
+    TIM_IC_InitTypeDef sConfigIC = {0};
+
+    htim2.Instance = TIM2;
+    htim2.Init.Prescaler = 79;
+    htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim2.Init.Period = 0xFFFFFFFF;
+    htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    if (HAL_TIM_Base_Init(&htim2) != HAL_OK) Error_Handler();
+
+    sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+    if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK) Error_Handler();
+
+    if (HAL_TIM_IC_Init(&htim2) != HAL_OK) Error_Handler();
+
+    sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+    if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK) Error_Handler();
+
+    sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+    sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+    sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+    sConfigIC.ICFilter = 0;
+    if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_1) != HAL_OK) Error_Handler();
 }
 
 /**
@@ -195,6 +228,27 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM2)
+    {
+        uint32_t currentCapture = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+        uint32_t diff;
+        if (currentCapture >= lastCapture)
+            diff = currentCapture - lastCapture;
+        else
+            diff = (0xFFFFFFFF - lastCapture) + currentCapture;
+
+        lastCapture = currentCapture;
+
+        // Timer tick frequency = 1 MHz if prescaler = 79 (80 MHz / 80 = 1 MHz)
+        float frequency = 1000000.0f / diff;
+
+        // Assuming 1 pulse per revolution:
+        rpm = frequency * 60.0f;
+    }
+}
 
 /* USER CODE END 4 */
 
