@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+/* DRV503_RPM_Sensor by Verenize Sotelo */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -123,6 +123,8 @@ int main(void)
   {
 
     /* USER CODE END WHILE */
+	  printf("RPM: %lu\r\n", rpm);
+	  HAL_Delay(500);
 
     /* USER CODE BEGIN 3 */
   }
@@ -247,6 +249,31 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
         // Assuming 1 pulse per revolution:
         rpm = frequency * 60.0f;
+    }
+}
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM2 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+    {
+        uint32_t now = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+        uint32_t period;
+
+        if (now >= lastCapture)
+            period = now - lastCapture;
+        else
+            period = (0xFFFFFFFF - lastCapture) + now + 1;  // handle timer overflow
+
+        lastCapture = now;
+
+        // Timer tick frequency = 80 MHz / (Prescaler+1)
+        // With Prescaler = 79 → tick = 1 MHz → 1 tick = 1 microsecond
+
+        if (period > 0)
+        {
+            float time_sec = period / 1e6f;       // convert microseconds → seconds
+            rpm = (uint32_t)(60.0f / time_sec);   // because 1 pulse per revolution
+        }
     }
 }
 
