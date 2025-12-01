@@ -115,7 +115,15 @@ int main(void)
   {
 
     /* USER CODE END WHILE */
-
+    if (HAL_I2C_Mem_Read(&hi2c3, 0x36 << 1, 0x0F, I2C_MEMADD_SIZE_8BIT, as5600_data, 2, HAL_MAX_DELAY) == HAL_OK)
+	   {
+  		  // 0000 b12 b11 b10 b9 << 8 = b12 b11 b10 b9 0000 0000
+  		  // b12 b11 b10 b9 0000 0000 | 0000 b8 b7 b6 b5 b4 b3 b2 b1 = b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1
+  		  as5600_raw = (as5600_data[0] << 8) | as5600_data[1];
+  		  as5600_raw &= 0x0FFF; // b12 b11 b10 b9 b8 b7 b6 b5 b4 b3 b2 b1
+  
+  		  as5600_deg = (as5600_raw * 180.0f) / 4096.0f; // value between 0 and 180, can change to -90 to 90
+	   }
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
