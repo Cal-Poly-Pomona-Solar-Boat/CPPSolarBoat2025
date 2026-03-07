@@ -1,0 +1,1407 @@
+[
+    {
+        "id": "f62291b0924f1e70",
+        "type": "tab",
+        "label": "BoatDashboard",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "dbd660c1f18b1cf3",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 440,
+        "wires": [
+            [
+                "462165e3d468f4d6"
+            ]
+        ]
+    },
+    {
+        "id": "c5ace8c2e171cd8b",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 130,
+        "y": 140,
+        "wires": [
+            [
+                "329a8c49fc763803"
+            ]
+        ]
+    },
+    {
+        "id": "329a8c49fc763803",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 2",
+        "func": "// msg.payload is temperature in °C\nconst t = Number(msg.payload);\nmsg.payload = t;\n\n// pick your colors\nmsg.ui_update = msg.ui_update || {};\nmsg.ui_update.style = msg.ui_update.style || {};\n\n// red if >= 60, otherwise normal\nmsg.ui_update.style.color = (t >= 60) ? \"#ff0000\" : \"#00bcd4\";      // text/needle color\nmsg.ui_update.style[\"--gauge-fill\"] = (t >= 60) ? \"#ff0000\" : \"#00bcd4\"; // some widgets use CSS vars\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 140,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "f0a538d09359f923",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 150,
+        "y": 40,
+        "wires": [
+            [
+                "448f573912b8a867"
+            ]
+        ]
+    },
+    {
+        "id": "448f573912b8a867",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 7",
+        "func": "msg.payload = (Math.random() * 70 - 35).toFixed(1);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 40,
+        "wires": [
+            [
+                "e607d66b94ae08d8"
+            ]
+        ]
+    },
+    {
+        "id": "e607d66b94ae08d8",
+        "type": "ui-gauge",
+        "z": "f62291b0924f1e70",
+        "name": "Rudder input",
+        "group": "90ebb2c809166208",
+        "order": 13,
+        "value": "payload",
+        "valueType": "msg",
+        "width": 3,
+        "height": 3,
+        "gtype": "gauge-half",
+        "gstyle": "needle",
+        "title": "Rudder input",
+        "alwaysShowTitle": false,
+        "floatingTitlePosition": "top-left",
+        "units": "units",
+        "icon": "",
+        "prefix": "",
+        "suffix": "",
+        "segments": [
+            {
+                "from": "0",
+                "color": "#5c70d6",
+                "text": "",
+                "textType": "label"
+            }
+        ],
+        "min": "-35",
+        "max": "35",
+        "sizeThickness": 16,
+        "sizeGap": 4,
+        "sizeKeyThickness": 8,
+        "styleRounded": true,
+        "styleGlow": false,
+        "className": "",
+        "x": 590,
+        "y": 40,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "3321d62c93dfc64a",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 8",
+        "func": "msg.payload = (Math.random() * 70 - 35).toFixed(1);\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 360,
+        "y": 100,
+        "wires": [
+            [
+                "03754648dc156b8b"
+            ]
+        ]
+    },
+    {
+        "id": "03754648dc156b8b",
+        "type": "ui-gauge",
+        "z": "f62291b0924f1e70",
+        "name": "Rudder postion",
+        "group": "90ebb2c809166208",
+        "order": 11,
+        "value": "payload",
+        "valueType": "msg",
+        "width": 3,
+        "height": 3,
+        "gtype": "gauge-half",
+        "gstyle": "needle",
+        "title": "Rudder position",
+        "alwaysShowTitle": false,
+        "floatingTitlePosition": "top-left",
+        "units": "units",
+        "icon": "",
+        "prefix": "",
+        "suffix": "",
+        "segments": [
+            {
+                "from": "0",
+                "color": "#5c70d6",
+                "text": "",
+                "textType": "label"
+            }
+        ],
+        "min": "-35",
+        "max": "35",
+        "sizeThickness": 16,
+        "sizeGap": 4,
+        "sizeKeyThickness": 8,
+        "styleRounded": true,
+        "styleGlow": false,
+        "className": "",
+        "x": 580,
+        "y": 100,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "2c9119752d8b03a7",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 4,
+        "width": 2,
+        "height": 0,
+        "name": "Battery1 Temp",
+        "label": "Battery1 Temp: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "20",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "<span class=\"{{msg.className}}\">     {{msg.payload}} °C </span> <style> .normal {     color: green;     font-weight: bold; }  .hot {     color: red;     font-weight: bold;     animation: flash 0.7s infinite; }  @keyframes flash {     0%   { opacity: 1; }     50%  { opacity: 0.2; }     100% { opacity: 1; } } </style>",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 600,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "02d58e37a84475bd",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 560,
+        "wires": [
+            [
+                "f314241c1464792c"
+            ]
+        ]
+    },
+    {
+        "id": "f314241c1464792c",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 9",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // One decimal: 45.3\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 560,
+        "wires": [
+            [
+                "125572fe6e39beb7"
+            ]
+        ]
+    },
+    {
+        "id": "5fb63eaf24ae2a39",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 14,
+        "width": "3",
+        "height": "3",
+        "name": "Power Produced",
+        "label": "Power Produced: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "25",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 590,
+        "y": 600,
+        "wires": []
+    },
+    {
+        "id": "241d51c77b4cd494",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 600,
+        "wires": [
+            [
+                "01d176df6f7d4c44"
+            ]
+        ]
+    },
+    {
+        "id": "01d176df6f7d4c44",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 10",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // One decimal: 45.3\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 600,
+        "wires": [
+            [
+                "5fb63eaf24ae2a39"
+            ]
+        ]
+    },
+    {
+        "id": "2a1f7a20def60f90",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 12,
+        "width": "3",
+        "height": "3",
+        "name": "Motor L Power Draw",
+        "label": "Motor L power: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "25",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 600,
+        "y": 640,
+        "wires": []
+    },
+    {
+        "id": "c98cc73e8af1281b",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 640,
+        "wires": [
+            [
+                "43f57ff0765663c7"
+            ]
+        ]
+    },
+    {
+        "id": "43f57ff0765663c7",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 11",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // One decimal: 45.3\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 640,
+        "wires": [
+            [
+                "2a1f7a20def60f90"
+            ]
+        ]
+    },
+    {
+        "id": "0390d1f8cebd0305",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 15,
+        "width": "3",
+        "height": "3",
+        "name": "Motor R Power Draw",
+        "label": "Motor R power: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "25",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 600,
+        "y": 680,
+        "wires": []
+    },
+    {
+        "id": "7bef01d9f9b09f7f",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 680,
+        "wires": [
+            [
+                "61bcb8ee8aeef28c"
+            ]
+        ]
+    },
+    {
+        "id": "61bcb8ee8aeef28c",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 12",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // One decimal: 45.3\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 680,
+        "wires": [
+            [
+                "0390d1f8cebd0305"
+            ]
+        ]
+    },
+    {
+        "id": "b19be83c3e64f4fc",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 16,
+        "width": "3",
+        "height": "3",
+        "name": "Avg Motor power draw",
+        "label": "Avg Motor power: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "25",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 600,
+        "y": 720,
+        "wires": []
+    },
+    {
+        "id": "69c4514bbe414f6b",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 720,
+        "wires": [
+            [
+                "2213fc042172f633"
+            ]
+        ]
+    },
+    {
+        "id": "2213fc042172f633",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 13",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // One decimal: 45.3\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 720,
+        "wires": [
+            [
+                "b19be83c3e64f4fc"
+            ]
+        ]
+    },
+    {
+        "id": "d8d1d53af995e3cf",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 130,
+        "y": 180,
+        "wires": [
+            [
+                "383e82d385469803"
+            ]
+        ]
+    },
+    {
+        "id": "383e82d385469803",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 6",
+        "func": "const THRESH = 60;\n\nfunction randTemp() {\n  let t = 20 + Math.random() * 50;  // 20..70\n  return Math.round(t * 10) / 10;\n}\n\n// Create 6 temps\nconst temps = Array.from({ length: 6 }, randTemp);\n\n// -------- Output 1: UI update (NO payload!) --------\n// Note: when adjusting series settings, include ALL series each time. :contentReference[oaicite:2]{index=2}\nconst updateMsg = {\n  ui_update: {\n    chartOptions: {\n      series: [\n        { name: \"Normal\", type: \"bar\", stack: \"temps\", itemStyle: { color: \"#00bcd4\" } },\n        { name: \"Hot\", type: \"bar\", stack: \"temps\", itemStyle: { color: \"red\" } }\n      ]\n    }\n  }\n};\n\n// -------- Output 2: Data (Replace) --------\nconst payload = [];\n\nfor (let i = 0; i < 6; i++) {\n  const label = `Battery ${i + 1}`;\n  const t = temps[i];\n\n  payload.push({\n    series: \"Normal\",\n    property: label,\n    y: (t >= THRESH) ? null : t\n  });\n\n  payload.push({\n    series: \"Hot\",\n    property: label,\n    y: (t >= THRESH) ? t : null\n  });\n}\n\nconst dataMsg = {\n  action: \"replace\",\n  payload\n};\n\nreturn [updateMsg, dataMsg];",
+        "outputs": 2,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 180,
+        "wires": [
+            [
+                "c059ac8f9270bff2"
+            ],
+            [
+                "c059ac8f9270bff2"
+            ]
+        ]
+    },
+    {
+        "id": "39fb39a7c2624a6f",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 5,
+        "width": 2,
+        "height": 0,
+        "name": "Battery2 Temp",
+        "label": "Battery2 Temp: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "20",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 860,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "802ce684e555f587",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 130,
+        "y": 220,
+        "wires": [
+            [
+                "d3aa03c2d62c2ab9"
+            ]
+        ]
+    },
+    {
+        "id": "d3aa03c2d62c2ab9",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 14",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // Random 0-100\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 220,
+        "wires": [
+            [
+                "24351805e844630f"
+            ]
+        ]
+    },
+    {
+        "id": "24351805e844630f",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 6,
+        "width": 2,
+        "height": 0,
+        "name": "Battery3 Temp",
+        "label": "Battery3 Temp: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "20",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 780,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "0cc471163bd182a0",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 130,
+        "y": 260,
+        "wires": [
+            [
+                "0060471e3fe5cc6d"
+            ]
+        ]
+    },
+    {
+        "id": "0060471e3fe5cc6d",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 15",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // Random 0-100\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 260,
+        "wires": [
+            [
+                "fb5e12a5f714e05d"
+            ]
+        ]
+    },
+    {
+        "id": "fb5e12a5f714e05d",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 7,
+        "width": 2,
+        "height": 0,
+        "name": "Battery4 Temp",
+        "label": "Battery4 Temp: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "20",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 600,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "995d8b4148d45d12",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 130,
+        "y": 300,
+        "wires": [
+            [
+                "f94c946618976903"
+            ]
+        ]
+    },
+    {
+        "id": "f94c946618976903",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 16",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // Random 0-100\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 330,
+        "y": 300,
+        "wires": [
+            [
+                "c8d9a799c6076d05"
+            ]
+        ]
+    },
+    {
+        "id": "c8d9a799c6076d05",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 8,
+        "width": 2,
+        "height": 0,
+        "name": "Battery5 Temp",
+        "label": "Battery5 Temp: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "20",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 600,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "358bfa151ead376e",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 130,
+        "y": 340,
+        "wires": [
+            [
+                "eaf15827eaa34afe"
+            ]
+        ]
+    },
+    {
+        "id": "eaf15827eaa34afe",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 3",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // Random 0-100\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 340,
+        "wires": [
+            [
+                "16c109424df0eaa0"
+            ]
+        ]
+    },
+    {
+        "id": "16c109424df0eaa0",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 9,
+        "width": 2,
+        "height": 0,
+        "name": "Battery6 Temp",
+        "label": "Battery6 Temp: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "20",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 600,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "335e09a150447e78",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 130,
+        "y": 380,
+        "wires": [
+            [
+                "fe73c31d1d2c19ba"
+            ]
+        ]
+    },
+    {
+        "id": "fe73c31d1d2c19ba",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 4",
+        "func": "msg.payload = (Math.random() * 100).toFixed(1); // Random 0-100\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 380,
+        "wires": [
+            [
+                "958677bee67cbea9"
+            ]
+        ]
+    },
+    {
+        "id": "958677bee67cbea9",
+        "type": "ui-text",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "order": 17,
+        "width": 3,
+        "height": 0,
+        "name": "Panel Temp:",
+        "label": "Panel Temp: ",
+        "format": "{{msg.payload}}",
+        "layout": "row-left",
+        "style": true,
+        "font": "",
+        "fontSize": "25",
+        "color": "#000000",
+        "wrapText": false,
+        "className": "",
+        "value": "payload",
+        "valueType": "msg",
+        "x": 590,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "20efbbaa93a41916",
+        "type": "inject",
+        "z": "f62291b0924f1e70",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 110,
+        "y": 500,
+        "wires": [
+            [
+                "e887087e98302ead"
+            ]
+        ]
+    },
+    {
+        "id": "e887087e98302ead",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 1",
+        "func": "msg.payload = Math.floor(Math.random() * 51); // 0..50 mph\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 500,
+        "wires": [
+            [
+                "41f2958a2665ef6a"
+            ]
+        ]
+    },
+    {
+        "id": "c059ac8f9270bff2",
+        "type": "ui-chart",
+        "z": "f62291b0924f1e70",
+        "group": "90ebb2c809166208",
+        "name": "Battery temperatures",
+        "label": "Battery Temperatures",
+        "order": 10,
+        "chartType": "bar",
+        "category": "series",
+        "categoryType": "property",
+        "xAxisLabel": "",
+        "xAxisProperty": "property",
+        "xAxisPropertyType": "property",
+        "xAxisType": "category",
+        "xAxisFormat": "",
+        "xAxisFormatType": "auto",
+        "xmin": "",
+        "xmax": "",
+        "yAxisLabel": "",
+        "yAxisProperty": "y",
+        "yAxisPropertyType": "property",
+        "ymin": "0",
+        "ymax": "80",
+        "bins": 10,
+        "action": "replace",
+        "stackSeries": true,
+        "pointShape": "circle",
+        "pointRadius": 4,
+        "showLegend": true,
+        "removeOlder": 1,
+        "removeOlderUnit": "3600",
+        "removeOlderPoints": "",
+        "colors": [
+            "#0095ff",
+            "#ff0000",
+            "#ff7f0e",
+            "#2ca02c",
+            "#a347e1",
+            "#d62728",
+            "#ff9896",
+            "#9467bd",
+            "#c5b0d5"
+        ],
+        "textColor": [
+            "#666666"
+        ],
+        "textColorDefault": true,
+        "gridColor": [
+            "#e5e5e5"
+        ],
+        "gridColorDefault": true,
+        "width": "6",
+        "height": "5",
+        "className": "",
+        "interpolation": "linear",
+        "x": 620,
+        "y": 180,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "41f2958a2665ef6a",
+        "type": "ui-gauge-classic",
+        "z": "f62291b0924f1e70",
+        "name": "Motor L  Speed",
+        "group": "90ebb2c809166208",
+        "order": 3,
+        "width": "2",
+        "height": "2",
+        "min": 0,
+        "max": "160",
+        "sectors": [
+            {
+                "start": "0",
+                "color": "white"
+            },
+            {
+                "start": "100",
+                "color": "orange"
+            }
+        ],
+        "major_division": "10",
+        "minor_division": "5",
+        "value_decimal_places": 1,
+        "scale_decimal_places": 0,
+        "label": "",
+        "measurement": "L Speed",
+        "units": "mph",
+        "needles": [
+            {
+                "topic": "",
+                "color": "black",
+                "lengthPercent": "100"
+            }
+        ],
+        "hubcolor": "black",
+        "sweep_angle": "280",
+        "keepwidth": true,
+        "myclass": "",
+        "x": 580,
+        "y": 500,
+        "wires": []
+    },
+    {
+        "id": "125572fe6e39beb7",
+        "type": "ui-gauge-classic",
+        "z": "f62291b0924f1e70",
+        "name": "Motor R  Speed",
+        "group": "90ebb2c809166208",
+        "order": 2,
+        "width": "2",
+        "height": "2",
+        "min": 0,
+        "max": "160",
+        "sectors": [
+            {
+                "start": "0",
+                "color": "white"
+            },
+            {
+                "start": "100",
+                "color": "orange"
+            }
+        ],
+        "major_division": "10",
+        "minor_division": "5",
+        "value_decimal_places": "0",
+        "scale_decimal_places": 0,
+        "label": "",
+        "measurement": "R speed",
+        "units": "mph",
+        "needles": [
+            {
+                "topic": "",
+                "color": "black",
+                "lengthPercent": "100"
+            }
+        ],
+        "hubcolor": "black",
+        "sweep_angle": "280",
+        "keepwidth": true,
+        "myclass": "",
+        "x": 580,
+        "y": 560,
+        "wires": []
+    },
+    {
+        "id": "44a8cbacfe62dfee",
+        "type": "ui-gauge-classic",
+        "z": "f62291b0924f1e70",
+        "name": "RPM",
+        "group": "90ebb2c809166208",
+        "order": 1,
+        "width": "2",
+        "height": "2",
+        "min": 0,
+        "max": "10",
+        "sectors": [
+            {
+                "start": "0",
+                "color": "white"
+            },
+            {
+                "start": "5.5",
+                "color": "orange"
+            },
+            {
+                "start": "6",
+                "color": "red"
+            }
+        ],
+        "major_division": "1",
+        "minor_division": "1",
+        "value_decimal_places": "1",
+        "scale_decimal_places": 0,
+        "label": "",
+        "measurement": "rpm",
+        "units": "x1000",
+        "needles": [
+            {
+                "topic": "",
+                "color": "black",
+                "lengthPercent": "100"
+            }
+        ],
+        "hubcolor": "black",
+        "sweep_angle": "180",
+        "keepwidth": true,
+        "myclass": "",
+        "x": 670,
+        "y": 440,
+        "wires": []
+    },
+    {
+        "id": "462165e3d468f4d6",
+        "type": "function",
+        "z": "f62291b0924f1e70",
+        "name": "function 5",
+        "func": "msg.payload = Math.floor(Math.random() * 11); // 0..50 mph\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 440,
+        "wires": [
+            [
+                "44a8cbacfe62dfee"
+            ]
+        ]
+    },
+    {
+        "id": "90ebb2c809166208",
+        "type": "ui-group",
+        "name": "block",
+        "page": "f58ee41c1d44b9f6",
+        "width": "27",
+        "height": "18",
+        "order": 1,
+        "showTitle": false,
+        "className": "",
+        "visible": true,
+        "disabled": "false",
+        "groupType": "default"
+    },
+    {
+        "id": "f58ee41c1d44b9f6",
+        "type": "ui-page",
+        "name": "Home",
+        "ui": "72851d11b2cb37ff",
+        "path": "/page1",
+        "icon": "",
+        "layout": "grid",
+        "theme": "5f256e1afcdb4315",
+        "breakpoints": [
+            {
+                "name": "Default",
+                "px": "0",
+                "cols": "3"
+            },
+            {
+                "name": "Tablet",
+                "px": "576",
+                "cols": "6"
+            },
+            {
+                "name": "Small Desktop",
+                "px": "768",
+                "cols": "9"
+            },
+            {
+                "name": "Desktop",
+                "px": "1024",
+                "cols": "12"
+            }
+        ],
+        "order": 1,
+        "className": "",
+        "visible": true,
+        "disabled": false
+    },
+    {
+        "id": "72851d11b2cb37ff",
+        "type": "ui-base",
+        "name": "My Dashboard",
+        "path": "/dashboard",
+        "appIcon": "",
+        "includeClientData": true,
+        "acceptsClientConfig": [
+            "ui-notification",
+            "ui-control"
+        ],
+        "showPathInSidebar": false,
+        "headerContent": "page",
+        "navigationStyle": "icon",
+        "titleBarStyle": "hidden",
+        "showReconnectNotification": true,
+        "notificationDisplayTime": 1,
+        "showDisconnectNotification": true,
+        "allowInstall": false
+    },
+    {
+        "id": "5f256e1afcdb4315",
+        "type": "ui-theme",
+        "name": "Default Theme",
+        "colors": {
+            "surface": "#ffffff",
+            "primary": "#0094ce",
+            "bgPage": "#eeeeee",
+            "groupBg": "#ffffff",
+            "groupOutline": "#cccccc"
+        },
+        "sizes": {
+            "density": "comfortable",
+            "pagePadding": "6px",
+            "groupGap": "6px",
+            "groupBorderRadius": "2px",
+            "widgetGap": "6px"
+        }
+    },
+    {
+        "id": "75b74b053cdfa425",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "@flowfuse/node-red-dashboard": "1.30.2",
+            "@colinl/node-red-dashboard-2-ui-gauge-classic": "1.4.0"
+        }
+    }
+]
