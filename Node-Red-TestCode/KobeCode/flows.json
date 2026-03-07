@@ -1,0 +1,117 @@
+[
+    {
+        "id": "bcd522d09ac1f881",
+        "type": "tab",
+        "label": "InfluxDB_Database",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "2ac09ff5fc3dab24",
+        "type": "influxdb batch",
+        "z": "bcd522d09ac1f881",
+        "influxdb": "e23d276e70b3eb4d",
+        "precision": "",
+        "retentionPolicy": "",
+        "name": "",
+        "database": "database",
+        "precisionV18FluxV20": "ms",
+        "retentionPolicyV18Flux": "",
+        "org": "CPPSolarBoat",
+        "bucket": "kobe",
+        "x": 450,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "382698ea909a2d88",
+        "type": "inject",
+        "z": "bcd522d09ac1f881",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "5",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 90,
+        "y": 300,
+        "wires": [
+            [
+                "3153360f5ce1bcc3"
+            ]
+        ]
+    },
+    {
+        "id": "3153360f5ce1bcc3",
+        "type": "function",
+        "z": "bcd522d09ac1f881",
+        "name": "function 18",
+        "func": "function rand(min, max) {\n    return Number((Math.random() * (max - min) + min).toFixed(1));\n}\n\nconst t = new Date();\n\nmsg.payload = [\n    {\n        measurement: \"rudder_input\",\n        fields: { value: rand(-35, 35) },\n        timestamp: t\n    },\n    {\n        measurement: \"rudder_position\",\n        fields: { value: rand(-35, 35) },\n        timestamp: t\n    },\n    {\n        measurement: \"battery1_temp\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"battery2_temp\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"battery3_temp\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"battery4_temp\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"battery5_temp\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"battery6_temp\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"panel_temp\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"motor_l_speed\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"motor_r_speed\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"power_produced\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"motor_l_power_draw\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"motor_r_power_draw\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    },\n    {\n        measurement: \"avg_motor_power_draw\",\n        fields: { value: rand(0, 100) },\n        timestamp: t\n    }\n];\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 240,
+        "y": 300,
+        "wires": [
+            [
+                "2ac09ff5fc3dab24",
+                "f1297a2b0c31c46c"
+            ]
+        ]
+    },
+    {
+        "id": "f1297a2b0c31c46c",
+        "type": "debug",
+        "z": "bcd522d09ac1f881",
+        "name": "debug 4",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 420,
+        "y": 360,
+        "wires": []
+    },
+    {
+        "id": "e23d276e70b3eb4d",
+        "type": "influxdb",
+        "hostname": "127.0.0.1",
+        "port": 8086,
+        "protocol": "http",
+        "database": "database",
+        "name": "solarboatcpp",
+        "usetls": false,
+        "tls": "",
+        "influxdbVersion": "2.0",
+        "url": "http://localhost:8086",
+        "timeout": 10,
+        "rejectUnauthorized": true
+    },
+    {
+        "id": "ac9d5b42198ac9b1",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-influxdb": "0.7.0"
+        }
+    }
+]
