@@ -91,13 +91,17 @@ float    throttle_out = 0.0f;
 uint8_t  adxl1_id;
 uint8_t  adxl1_data[6];
 int16_t  ax1, ay1, az1;
+float	 accel_x1[10], accel_y1[10], accel_z1[10];
 uint8_t  adxl_power_ctl = 0x08;
 float    adxl_cal_val   = 0.0039f;
+int		 adxl1_index = 0;
 
 /* --- ADXL345 #2 (motor 2) --- */
 uint8_t  adxl2_id;
 uint8_t  adxl2_data[6];
 int16_t  ax2, ay2, az2;
+float	 accel_x2[10], accel_y2[10], accel_z2[10];
+int		 adxl2_index = 0;
 
 /* --- Hall-effect #1 RPM --- */
 #define AVG_SAMPLES           5
@@ -407,35 +411,51 @@ int main(void)
       /* -----------------------------------------------------------------
        * ID 0x002 — ADXL345 #1 (motor 1 vibration)
        * ----------------------------------------------------------------- */
-      if (now - last_tick_adxl1 >= SENSOR_RATE_MS)
+      if (now - last_tick_adxl1 >= SENSOR_RATE_MS / 10)
       {
           HAL_I2C_Mem_Read(&hi2c3, 0xA6, 0x32, 1, adxl1_data, 6, HAL_MAX_DELAY);
           ax1 = (int16_t)((adxl1_data[1] << 8) | adxl1_data[0]);
           ay1 = (int16_t)((adxl1_data[3] << 8) | adxl1_data[2]);
           az1 = (int16_t)((adxl1_data[5] << 8) | adxl1_data[4]);
-          float accel_x1 = ax1 * adxl_cal_val;
-          float accel_y1 = ay1 * adxl_cal_val;
-          float accel_z1 = az1 * adxl_cal_val;
-          printf("ADXL1  x:%.2f  y:%.2f  z:%.2f g\r\n", accel_x1, accel_y1, accel_z1);
-          can_tx_adxl1(accel_x1, accel_y1, accel_z1);
-          last_tick_adxl1 = now;
+
+          if (adxl1_index < 10)
+          {
+			  accel_x1[adxl1_index] = ax1 * adxl_cal_val;
+			  accel_y1[adxl1_index] = ay1 * adxl_cal_val;
+			  accel_z1[adxl1_index] = az1 * adxl_cal_val;
+			  adxl1_index++;
+          }
+          else
+          {
+        	  //can_tx_adxl1(accel_x1, accel_y1, accel_z1);
+        	  adxl1_index = 0;
+          }
+    	  last_tick_adxl1 = now;
       }
 
       /* -----------------------------------------------------------------
        * ID 0x003 — ADXL345 #2 (motor 2 vibration)
        * ----------------------------------------------------------------- */
-      if (now - last_tick_adxl2 >= SENSOR_RATE_MS)
+      if (now - last_tick_adxl2 >= SENSOR_RATE_MS / 10)
       {
-          HAL_I2C_Mem_Read(&hi2c3, 0x3A, 0x32, 1, adxl2_data, 6, HAL_MAX_DELAY);
+    	  HAL_I2C_Mem_Read(&hi2c3, 0x3A, 0x32, 1, adxl2_data, 6, HAL_MAX_DELAY);
           ax2 = (int16_t)((adxl2_data[1] << 8) | adxl2_data[0]);
           ay2 = (int16_t)((adxl2_data[3] << 8) | adxl2_data[2]);
           az2 = (int16_t)((adxl2_data[5] << 8) | adxl2_data[4]);
-          float accel_x2 = ax2 * adxl_cal_val;
-          float accel_y2 = ay2 * adxl_cal_val;
-          float accel_z2 = az2 * adxl_cal_val;
-          printf("ADXL2  x:%.2f  y:%.2f  z:%.2f g\r\n", accel_x2, accel_y2, accel_z2);
-          can_tx_adxl2(accel_x2, accel_y2, accel_z2);
-          last_tick_adxl2 = now;
+
+          if (adxl2_index < 10)
+          {
+			  accel_x2[adxl2_index] = ax2 * adxl_cal_val;
+			  accel_y2[adxl2_index] = ay2 * adxl_cal_val;
+			  accel_z2[adxl2_index] = az2 * adxl_cal_val;
+			  adxl2_index++;
+          }
+          else
+          {
+        	  //can_tx_adxl2(accel_x2, accel_y2, accel_z2);
+        	  adxl2_index = 0;
+          }
+    	  last_tick_adxl2 = now;
       }
 
       /* -----------------------------------------------------------------
