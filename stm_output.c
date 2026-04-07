@@ -98,7 +98,8 @@ uint8_t  adxl1_id;
 uint8_t  adxl1_data[6];
 int16_t  ax1, ay1, az1;
 float	 accel_x1[10], accel_y1[10], accel_z1[10];
-float	 sum_x1 = 0, sum_y1 = 0, sum_z1 = 0;
+float	 mean_x1 = 0.0f, mean_y1 = 0.0f, mean_z1 = 0.0f;
+float	 sum_x1 = 0.0f, sum_y1 = 0.0f, sum_z1 = 0.0f;
 uint8_t  adxl_power_ctl = 0x08;
 float    adxl_cal_val   = 0.0039f;
 int		 adxl1_index = 0;
@@ -108,7 +109,8 @@ uint8_t  adxl2_id;
 uint8_t  adxl2_data[6];
 int16_t  ax2, ay2, az2;
 float	 accel_x2[10], accel_y2[10], accel_z2[10];
-float	 sum_x2 = 0, sum_y2 = 0, sum_z2 = 0;
+float	 mean_x2 = 0.0f, mean_y2 = 0.0f, mean_z2 = 0.0f;
+float	 sum_x2 = 0.0f, sum_y2 = 0.0f, sum_z2 = 0.0f;
 int		 adxl2_index = 0;
 
 /* --- Hall-effect #1 RPM --- */
@@ -435,18 +437,33 @@ int main(void)
           }
           else
           {
-        	  for (int i = 0; i < adxl1_index; i++) sum_x1 += accel_x1[i] * accel_x1[i];
-        	  for (int i = 0; i < adxl1_index; i++) sum_y1 += accel_y1[i] * accel_x1[i];
-        	  for (int i = 0; i < adxl1_index; i++) sum_z1 += accel_z1[i] * accel_x1[i];
+        	  for (int i = 0; i < adxl1_index; i++) mean_x1 += accel_x1[i];
+        	  for (int i = 0; i < adxl1_index; i++) mean_y1 += accel_y1[i];
+        	  for (int i = 0; i < adxl1_index; i++) mean_z1 += accel_z1[i];
 
-        	  uint8_t adxl1_safe = (sqrtf(sum_x1 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
-        			  	  	  	   (sqrtf(sum_y1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
-								   (sqrtf(sum_z1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+			  mean_x1 /= ADXL_SAMPLES;
+			  mean_y1 /= ADXL_SAMPLES;
+			  mean_z1 /= ADXL_SAMPLES;
+			  
+			  for (int i = 0; i < adxl1_index; i++) sum_x1 += (accel_x1[i] - mean_x1) * (accel_x1[i] - mean_x1);
+        	  for (int i = 0; i < adxl1_index; i++) sum_y1 += (accel_y1[i] - mean_y1) * (accel_y1[i] - mean_y1);
+        	  for (int i = 0; i < adxl1_index; i++) sum_z1 += (accel_z1[i] - mean_z1) * (accel_z1[i] - mean_z1);
 
-        	  //can_tx_adxl1(adxl1_safe);
+        	  uint8_t adxl1_unsafe = (sqrtf(sum_x1 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
+        			  	  	  	     (sqrtf(sum_y1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
+								     (sqrtf(sum_z1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+
+        	  //can_tx_adxl1(adxl1_unsafe);
         	  adxl1_index = 0;
+			  sum_x1 = 0.0f;
+			  sum_y1 = 0.0f;
+			  sum_z1 = 0.0f;
+			  mean_x1 = 0.0f;
+			  mean_y1 = 0.0f;
+			  mean_z1 = 0.0f;
           }
-    	  last_tick_adxl1 = now;
+    	  
+		  last_tick_adxl1 = now;
       }
 
       /* -----------------------------------------------------------------
@@ -468,18 +485,33 @@ int main(void)
           }
           else
           {
-        	  for (int i = 0; i < adxl2_index; i++) sum_x2 += accel_x2[i] * accel_x2[i];
-        	  for (int i = 0; i < adxl2_index; i++) sum_y2 += accel_y2[i] * accel_x2[i];
-        	  for (int i = 0; i < adxl2_index; i++) sum_z2 += accel_z2[i] * accel_x2[i];
+        	  for (int i = 0; i < adxl2_index; i++) mean_x2 += accel_x2[i];
+        	  for (int i = 0; i < adxl2_index; i++) mean_y2 += accel_y2[i];
+        	  for (int i = 0; i < adxl2_index; i++) mean_z2 += accel_z2[i];
 
-        	  uint8_t adxl2_safe = (sqrtf(sum_x2 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
-        			  	  	  	   (sqrtf(sum_y2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
-								   (sqrtf(sum_z2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+			  mean_x2 /= ADXL_SAMPLES;
+			  mean_y2 /= ADXL_SAMPLES;
+			  mean_z2 /= ADXL_SAMPLES;
+			  
+			  for (int i = 0; i < adxl2_index; i++) sum_x2 += (accel_x2[i] - mean_x2) * (accel_x2[i] - mean_x2);
+        	  for (int i = 0; i < adxl2_index; i++) sum_y2 += (accel_y2[i] - mean_y2) * (accel_y2[i] - mean_y2);
+        	  for (int i = 0; i < adxl2_index; i++) sum_z2 += (accel_z2[i] - mean_z2) * (accel_z2[i] - mean_z2);
 
-        	  //can_tx_adxl2(adxl2_safe);
+        	  uint8_t adxl2_unsafe = (sqrtf(sum_x2 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
+        			  	  	  	   	 (sqrtf(sum_y2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
+								     (sqrtf(sum_z2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+
+        	  //can_tx_adxl2(adxl2_unsafe);
         	  adxl2_index = 0;
+			  sum_x2 = 0.0f;
+			  sum_y2 = 0.0f;
+			  sum_z2 = 0.0f;
+			  mean_x2 = 0.0f;
+			  mean_y2 = 0.0f;
+			  mean_z2 = 0.0f;
           }
-    	  last_tick_adxl2 = now;
+    	  
+		  last_tick_adxl2 = now;
       }
 
       /* -----------------------------------------------------------------
