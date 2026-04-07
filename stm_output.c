@@ -36,6 +36,7 @@
 /* USER CODE BEGIN Includes */
 #include "string.h"
 #include "can_frames.h"
+#include "math.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -88,10 +89,16 @@ uint16_t throttle_raw = 0;
 float    throttle_out = 0.0f;
 
 /* --- ADXL345 #1 (motor 1) --- */
+#define ADXL_SAMPLES 10
+#define ADXL_THRESH_X 10
+#define ADXL_THRESH_Y 10
+#define ADXL_THRESH_Z 10
+
 uint8_t  adxl1_id;
 uint8_t  adxl1_data[6];
 int16_t  ax1, ay1, az1;
 float	 accel_x1[10], accel_y1[10], accel_z1[10];
+float	 sum_x1 = 0, sum_y1 = 0, sum_z1 = 0;
 uint8_t  adxl_power_ctl = 0x08;
 float    adxl_cal_val   = 0.0039f;
 int		 adxl1_index = 0;
@@ -101,6 +108,7 @@ uint8_t  adxl2_id;
 uint8_t  adxl2_data[6];
 int16_t  ax2, ay2, az2;
 float	 accel_x2[10], accel_y2[10], accel_z2[10];
+float	 sum_x2 = 0, sum_y2 = 0, sum_z2 = 0;
 int		 adxl2_index = 0;
 
 /* --- Hall-effect #1 RPM --- */
@@ -411,14 +419,14 @@ int main(void)
       /* -----------------------------------------------------------------
        * ID 0x002 — ADXL345 #1 (motor 1 vibration)
        * ----------------------------------------------------------------- */
-      if (now - last_tick_adxl1 >= SENSOR_RATE_MS / 10)
+      if (now - last_tick_adxl1 >= SENSOR_RATE_MS / ADXL_SAMPLES)
       {
           HAL_I2C_Mem_Read(&hi2c3, 0xA6, 0x32, 1, adxl1_data, 6, HAL_MAX_DELAY);
           ax1 = (int16_t)((adxl1_data[1] << 8) | adxl1_data[0]);
           ay1 = (int16_t)((adxl1_data[3] << 8) | adxl1_data[2]);
           az1 = (int16_t)((adxl1_data[5] << 8) | adxl1_data[4]);
 
-          if (adxl1_index < 10)
+          if (adxl1_index < ADXL_SAMPLES)
           {
 			  accel_x1[adxl1_index] = ax1 * adxl_cal_val;
 			  accel_y1[adxl1_index] = ay1 * adxl_cal_val;
@@ -427,7 +435,15 @@ int main(void)
           }
           else
           {
-        	  //can_tx_adxl1(accel_x1, accel_y1, accel_z1);
+        	  for (int i = 0; i < adxl1_index; i++) sum_x1 += accel_x1[i] * accel_x1[i];
+        	  for (int i = 0; i < adxl1_index; i++) sum_y1 += accel_y1[i] * accel_x1[i];
+        	  for (int i = 0; i < adxl1_index; i++) sum_z1 += accel_z1[i] * accel_x1[i];
+
+        	  uint8_t adxl1_safe = (sqrtf(sum_x1 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
+        			  	  	  	   (sqrtf(sum_y1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
+								   (sqrtf(sum_z1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+
+        	  //can_tx_adxl1(adxl1_safe);
         	  adxl1_index = 0;
           }
     	  last_tick_adxl1 = now;
@@ -436,14 +452,14 @@ int main(void)
       /* -----------------------------------------------------------------
        * ID 0x003 — ADXL345 #2 (motor 2 vibration)
        * ----------------------------------------------------------------- */
-      if (now - last_tick_adxl2 >= SENSOR_RATE_MS / 10)
+      if (now - last_tick_adxl2 >= SENSOR_RATE_MS / ADXL_SAMPLES)
       {
     	  HAL_I2C_Mem_Read(&hi2c3, 0x3A, 0x32, 1, adxl2_data, 6, HAL_MAX_DELAY);
           ax2 = (int16_t)((adxl2_data[1] << 8) | adxl2_data[0]);
           ay2 = (int16_t)((adxl2_data[3] << 8) | adxl2_data[2]);
           az2 = (int16_t)((adxl2_data[5] << 8) | adxl2_data[4]);
 
-          if (adxl2_index < 10)
+          if (adxl2_index < ADXL_SAMPLES)
           {
 			  accel_x2[adxl2_index] = ax2 * adxl_cal_val;
 			  accel_y2[adxl2_index] = ay2 * adxl_cal_val;
@@ -452,7 +468,15 @@ int main(void)
           }
           else
           {
-        	  //can_tx_adxl2(accel_x2, accel_y2, accel_z2);
+        	  for (int i = 0; i < adxl2_index; i++) sum_x2 += accel_x2[i] * accel_x2[i];
+        	  for (int i = 0; i < adxl2_index; i++) sum_y2 += accel_y2[i] * accel_x2[i];
+        	  for (int i = 0; i < adxl2_index; i++) sum_z2 += accel_z2[i] * accel_x2[i];
+
+        	  uint8_t adxl2_safe = (sqrtf(sum_x2 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
+        			  	  	  	   (sqrtf(sum_y2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
+								   (sqrtf(sum_z2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+
+        	  //can_tx_adxl2(adxl2_safe);
         	  adxl2_index = 0;
           }
     	  last_tick_adxl2 = now;
