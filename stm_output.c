@@ -90,9 +90,9 @@ float    throttle_out = 0.0f;
 
 /* --- ADXL345 #1 (motor 1) --- */
 #define ADXL_SAMPLES 10
-#define ADXL_THRESH_X 10
-#define ADXL_THRESH_Y 10
-#define ADXL_THRESH_Z 10
+#define ADXL_THRESH_X 0.08f
+#define ADXL_THRESH_Y 0.08f
+#define ADXL_THRESH_Z 0.08f
 
 uint8_t  adxl1_id;
 uint8_t  adxl1_data[6];
@@ -356,7 +356,7 @@ int main(void)
               as56001_raw = ((uint16_t)as56001_data[0] << 8) | as56001_data[1];
               as56001_deg = (as56001_raw * 360.0f) / 4096.0f;
           }
-          printf("AS5600 #1 angle: %.2f deg\r\n", as56001_deg);
+          // printf("AS5600 #1 angle: %.2f deg\r\n", as56001_deg);
           can_tx_steering1(as56001_deg);
           last_tick_steering1 = now;
       }
@@ -374,7 +374,7 @@ int main(void)
               as56002_raw = ((uint16_t)as56002_data[0] << 8) | as56002_data[1];
               as56002_deg = (as56002_raw * 360.0f) / 4096.0f;
           }
-          printf("AS5600 #2 angle: %.2f deg\r\n", as56002_deg);
+          // printf("AS5600 #2 angle: %.2f deg\r\n", as56002_deg);
           can_tx_steering2(as56002_deg);
           last_tick_steering2 = now;
       }
@@ -392,7 +392,7 @@ int main(void)
               as56003_raw = ((uint16_t)as56003_data[0] << 8) | as56003_data[1];
               as56003_deg = (as56003_raw * 360.0f) / 4096.0f;
           }
-          printf("AS5600 #3 angle: %.2f deg\r\n", as56003_deg);
+          // printf("AS5600 #3 angle: %.2f deg\r\n", as56003_deg);
           //can_tx_steering3(as56003_deg);
           last_tick_steering3 = now;
       }
@@ -404,7 +404,7 @@ int main(void)
       {
           throttle_raw = read_adc();
           throttle_out = (throttle_raw * 3.3f) / 4096.0f;
-          printf("Throttle: %0.2f \r\n", throttle_out);
+          // printf("Throttle: %0.2f \r\n", throttle_out);
           // can_tx_(throttle_raw);
           last_tick_throttle = now;
       }
@@ -433,6 +433,7 @@ int main(void)
 			  accel_x1[adxl1_index] = ax1 * adxl_cal_val;
 			  accel_y1[adxl1_index] = ay1 * adxl_cal_val;
 			  accel_z1[adxl1_index] = az1 * adxl_cal_val;
+			  printf("ADXL1 x:%0.2f y:%0.2f z:%0.2f\r\n", accel_x1[adxl1_index], accel_y1[adxl1_index], accel_z1[adxl1_index]);
 			  adxl1_index++;
           }
           else
@@ -444,7 +445,7 @@ int main(void)
 			  mean_x1 /= ADXL_SAMPLES;
 			  mean_y1 /= ADXL_SAMPLES;
 			  mean_z1 /= ADXL_SAMPLES;
-			  
+
 			  for (int i = 0; i < adxl1_index; i++) sum_x1 += (accel_x1[i] - mean_x1) * (accel_x1[i] - mean_x1);
         	  for (int i = 0; i < adxl1_index; i++) sum_y1 += (accel_y1[i] - mean_y1) * (accel_y1[i] - mean_y1);
         	  for (int i = 0; i < adxl1_index; i++) sum_z1 += (accel_z1[i] - mean_z1) * (accel_z1[i] - mean_z1);
@@ -452,6 +453,10 @@ int main(void)
         	  uint8_t adxl1_unsafe = (sqrtf(sum_x1 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
         			  	  	  	     (sqrtf(sum_y1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
 								     (sqrtf(sum_z1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+              printf("ADXL1 x deviation: %0.2f\r\n", sqrtf(sum_x1 / (float)ADXL_SAMPLES));
+              printf("ADXL1 y deviation: %0.2f\r\n", sqrtf(sum_y1 / (float)ADXL_SAMPLES));
+              printf("ADXL1 z deviation: %0.2f\r\n", sqrtf(sum_z1 / (float)ADXL_SAMPLES));
+        	  printf("ADXL1 unsafe?: %d\r\n", adxl1_unsafe);
 
         	  //can_tx_adxl1(adxl1_unsafe);
         	  adxl1_index = 0;
@@ -462,7 +467,7 @@ int main(void)
 			  mean_y1 = 0.0f;
 			  mean_z1 = 0.0f;
           }
-    	  
+
 		  last_tick_adxl1 = now;
       }
 
@@ -492,7 +497,7 @@ int main(void)
 			  mean_x2 /= ADXL_SAMPLES;
 			  mean_y2 /= ADXL_SAMPLES;
 			  mean_z2 /= ADXL_SAMPLES;
-			  
+
 			  for (int i = 0; i < adxl2_index; i++) sum_x2 += (accel_x2[i] - mean_x2) * (accel_x2[i] - mean_x2);
         	  for (int i = 0; i < adxl2_index; i++) sum_y2 += (accel_y2[i] - mean_y2) * (accel_y2[i] - mean_y2);
         	  for (int i = 0; i < adxl2_index; i++) sum_z2 += (accel_z2[i] - mean_z2) * (accel_z2[i] - mean_z2);
@@ -500,6 +505,7 @@ int main(void)
         	  uint8_t adxl2_unsafe = (sqrtf(sum_x2 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
         			  	  	  	   	 (sqrtf(sum_y2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
 								     (sqrtf(sum_z2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+              printf("ADXL2 unsafe?: %d\r\n", adxl2_unsafe);
 
         	  //can_tx_adxl2(adxl2_unsafe);
         	  adxl2_index = 0;
@@ -510,7 +516,7 @@ int main(void)
 			  mean_y2 = 0.0f;
 			  mean_z2 = 0.0f;
           }
-    	  
+
 		  last_tick_adxl2 = now;
       }
 
@@ -531,7 +537,7 @@ int main(void)
               rpm_1     = 0.0f;
               rpm_1_avg = 0.0f;
           }
-          printf("RPM #1 Pulses: %lu  RPM: %.1f\r\n", pulse_1_count, rpm_1_avg);
+          // printf("RPM #1 Pulses: %lu  RPM: %.1f\r\n", pulse_1_count, rpm_1_avg);
           //can_tx_rpm(rpm_1_avg);
           last_tick_rpm_1 = now;
       }
@@ -553,7 +559,7 @@ int main(void)
               rpm_2     = 0.0f;
               rpm_2_avg = 0.0f;
          }
-         printf("RPM #2 Pulses: %lu  RPM: %.1f\r\n", pulse_2_count, rpm_2_avg);
+         // printf("RPM #2 Pulses: %lu  RPM: %.1f\r\n", pulse_2_count, rpm_2_avg);
          //can_tx_rpm(rpm_2_avg);
          last_tick_rpm_2 = now;
       }
