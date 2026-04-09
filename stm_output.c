@@ -387,12 +387,12 @@ int main(void)
       }
 
       /* -----------------------------------------------------------------
-       * ID 0x009 — Throttle 0-3.3V (ADC)
+       * ID 0x009 — Throttle 0-5V (ADC)
        * ----------------------------------------------------------------- */
       if (now - last_tick_throttle >= SENSOR_RATE_MS)
       {
           throttle_raw = read_adc();
-          throttle_out = (throttle_raw * 3.3f) / 4096.0f;
+          throttle_out = (throttle_raw * 5.0f) / 4096.0f;
           printf("Throttle: %.2f V\r\n", throttle_out);
           can_tx_throttle(throttle_out);
           last_tick_throttle = now;
