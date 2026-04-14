@@ -81,7 +81,7 @@ int main(void) {
     //Thermister paramaters
     thermistor_cfg_t tcfg = {
         .vref = ADC_VREF,
-        .r_fixed_ohms = 100000.0,      
+        .r_fixed_ohms = 1500000.0,      
         .r0_ohms = 100000.0,           
         .t0_c = 25.0,
         .beta = 3950.0                
