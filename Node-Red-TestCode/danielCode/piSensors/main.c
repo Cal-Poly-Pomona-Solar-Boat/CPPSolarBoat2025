@@ -86,14 +86,27 @@ int main(void) {
 
         double tc[10], t_ma[3], t_psi[3], v[7];
 
-        for (int i = 0; i < 10; i++) tc[i] = thermistor_c_from_adc(adc_read(&THERMS[i]), &tcfg);
+        // --- Thermistor Logic with NaN/Inf Guard ---
+        for (int i = 0; i < 10; i++) {
+            int raw = adc_read(&THERMS[i]);
+            // If ADC is 0 or 1023, the log math will produce nan/inf
+            if (raw <= 0 || raw >= 1023) {
+                tc[i] = 0.0;
+            } else {
+                tc[i] = thermistor_c_from_adc(raw, &tcfg);
+                // Final safety check for the resulting float
+                if (isnan(tc[i]) || isinf(tc[i])) tc[i] = 0.0;
+            }
+        }
+
         for (int i = 0; i < 3; i++) {
             t_ma[i] = transducer_from_adc(adc_read(&TRANS[i]), &icfg);
             t_psi[i] = transducer_eng_from_ma(t_ma[i], &icfg);
         }
+
         for (int i = 0; i < 7; i++) v[i] = voltage_from_adc(adc_read(&VOLTS[i]), &vcfg);
 
-        // ---- Build FLAT JSON (Compatible with your Node-RED Function) ----
+        // ---- Build FLAT JSON ----
         snprintf(json, sizeof(json),
             "{"
             "\"therm1\":%.2f,\"therm2\":%.2f,\"therm3\":%.2f,\"therm4\":%.2f,\"therm5\":%.2f,"
@@ -118,5 +131,8 @@ int main(void) {
         usleep(loop_us);
     }
 
-    return 0; // Standard cleanup omitted for brevity, keep your original cleanup
+    // Cleanup (Not reached in while(1) but good for reference)
+    mosquitto_destroy(mosq);
+    mosquitto_lib_cleanup();
+    return 0;
 }
