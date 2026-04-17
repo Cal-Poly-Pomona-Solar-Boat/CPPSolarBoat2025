@@ -32,7 +32,7 @@ static int adc_read(const adc_input_t *in) {
 }
 
 int main(void) {
-    // ---- Open ADCs (SPI) ----
+    // ---- Open Hardware ----
     int fd_adc0 = mcp3008_open("/dev/spidev1.0", 0, 1000000);
     int fd_adc1 = mcp3008_open("/dev/spidev1.1", 0, 1000000);
     int fd_adc2 = mcp3008_open("/dev/spidev1.2", 0, 1000000);
@@ -42,43 +42,28 @@ int main(void) {
         return 1; 
     }
 
-    // ---- Open IMU (I2C) with Graceful Failure ----
     int imu_fd = mpu6050_open(I2C_DEV);
-    int imu_active = 0;
+    int imu_active = (imu_fd >= 0 && mpu6050_init(imu_fd) == 0);
 
-    if (imu_fd < 0) {
-        fprintf(stderr, "Warning: MPU-6050 not found. Continuing without IMU.\n");
-    } else if (mpu6050_init(imu_fd) != 0) {
-        fprintf(stderr, "Warning: MPU-6050 init failed.\n");
-        mpu6050_close(imu_fd);
-        imu_fd = -1;
-    } else {
-        imu_active = 1;
-    }
-
-    // ---- MQTT Init ----
+    // ---- MQTT ----
     mosquitto_lib_init();
     struct mosquitto *mosq = mosquitto_new(MQTT_CLIENT_ID, true, NULL);
     if (!mosq) return 1;
-
     while (mosquitto_connect(mosq, MQTT_HOST, MQTT_PORT, 60) != MOSQ_ERR_SUCCESS) {
-        fprintf(stderr, "MQTT retry in 5s...\n");
+        fprintf(stderr, "MQTT connection failed, retrying...\n");
         sleep(5);
     }
     mosquitto_loop_start(mosq);
 
-    // ---- Sensor Configs ----
-    // Note: Configured for 100k thermistors and 100k/10k voltage dividers
+    // ---- Configs ----
     thermistor_cfg_t tcfg = { .vref = ADC_VREF, .r_fixed_ohms = 100000.0, .r0_ohms = 100000.0, .t0_c = 25.0, .beta = 3950.0 };
     transducer_cfg_t icfg = { .vref = ADC_VREF, .shunt_ohms = 165.0, .ma_min = 4.0, .ma_max = 20.0, .eng_min = 0.0, .eng_max = 100.0 };
     voltage_divider_cfg_t vcfg = { .vref = ADC_VREF, .r_top_ohms = 100000.0, .r_bot_ohms = 10000.0 };
 
-    // ---- ADC Map ----
     adc_input_t THERMS[] = { {fd_adc0,0}, {fd_adc0,1}, {fd_adc0,2}, {fd_adc0,3}, {fd_adc0,4}, {fd_adc0,5}, {fd_adc0,6}, {fd_adc0,7}, {fd_adc1,0}, {fd_adc1,1} };
     adc_input_t TRANS[]  = { {fd_adc1,2}, {fd_adc1,3}, {fd_adc1,4} };
     adc_input_t VOLTS[]  = { {fd_adc2,0}, {fd_adc2,1}, {fd_adc2,2}, {fd_adc2,3}, {fd_adc2,4}, {fd_adc2,5}, {fd_adc2,6} };
 
-    const useconds_t loop_us = (useconds_t)(1000000.0 / LOOP_HZ);
     char json[2048];
 
     while (1) {
@@ -87,31 +72,24 @@ int main(void) {
 
         double tc[10], t_ma[3], t_psi[3], v[7];
 
-        // --- Thermistor Logic with Defensive Guard ---
+        // --- Thermistors with Hard Check ---
         for (int i = 0; i < 10; i++) {
-            int raw = adc_read(&THERMS[i]);
-            // Widen check to catch noise (5-1018) to prevent 'nan' strings
-            if (raw < 5 || raw > 1018) {
-                tc[i] = 0.0;
-            } else {
-                tc[i] = thermistor_c_from_adc(raw, &tcfg);
-                // Catch any remaining floating point errors
-                if (!isnormal(tc[i]) && tc[i] != 0.0) tc[i] = 0.0;
-            }
+            tc[i] = thermistor_c_from_adc(adc_read(&THERMS[i]), &tcfg);
+            // Final JSON safety check
+            if (!isfinite(tc[i])) tc[i] = 0.0;
         }
 
-        // --- Transducers (Kept simple as per your request) ---
         for (int i = 0; i < 3; i++) {
             t_ma[i] = transducer_from_adc(adc_read(&TRANS[i]), &icfg);
             t_psi[i] = transducer_eng_from_ma(t_ma[i], &icfg);
+            if (!isfinite(t_psi[i])) t_psi[i] = 0.0;
         }
 
-        // --- Voltages ---
         for (int i = 0; i < 7; i++) {
             v[i] = voltage_from_adc(adc_read(&VOLTS[i]), &vcfg);
+            if (!isfinite(v[i])) v[i] = 0.0;
         }
 
-        // ---- Build FLAT JSON (Node-RED Compatible) ----
         snprintf(json, sizeof(json),
             "{"
             "\"therm1\":%.2f,\"therm2\":%.2f,\"therm3\":%.2f,\"therm4\":%.2f,\"therm5\":%.2f,"
@@ -132,20 +110,8 @@ int main(void) {
             imu_ok ? s.temp_c : 0.0
         );
 
-        // Publish to MQTT
         mosquitto_publish(mosq, NULL, MQTT_TOPIC, strlen(json), json, 0, false);
-        
-        // Loop timing
-        usleep(loop_us);
+        usleep(1000000 / LOOP_HZ);
     }
-
-    // Standard Cleanup
-    if (imu_fd >= 0) mpu6050_close(imu_fd);
-    mcp3008_close(fd_adc0);
-    mcp3008_close(fd_adc1);
-    mcp3008_close(fd_adc2);
-    mosquitto_destroy(mosq);
-    mosquitto_lib_cleanup();
-
     return 0;
 }
