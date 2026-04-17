@@ -32,7 +32,7 @@ static int adc_read(const adc_input_t *in) {
 }
 
 int main(void) {
-    // ---- Open ADCs ----
+    // ---- Open ADCs (SPI) ----
     int fd_adc0 = mcp3008_open("/dev/spidev1.0", 0, 1000000);
     int fd_adc1 = mcp3008_open("/dev/spidev1.1", 0, 1000000);
     int fd_adc2 = mcp3008_open("/dev/spidev1.2", 0, 1000000);
@@ -42,7 +42,7 @@ int main(void) {
         return 1; 
     }
 
-    // ---- Open IMU with Graceful Failure ----
+    // ---- Open IMU (I2C) with Graceful Failure ----
     int imu_fd = mpu6050_open(I2C_DEV);
     int imu_active = 0;
 
@@ -68,6 +68,7 @@ int main(void) {
     mosquitto_loop_start(mosq);
 
     // ---- Sensor Configs ----
+    // Note: Configured for 100k thermistors and 100k/10k voltage dividers
     thermistor_cfg_t tcfg = { .vref = ADC_VREF, .r_fixed_ohms = 100000.0, .r0_ohms = 100000.0, .t0_c = 25.0, .beta = 3950.0 };
     transducer_cfg_t icfg = { .vref = ADC_VREF, .shunt_ohms = 165.0, .ma_min = 4.0, .ma_max = 20.0, .eng_min = 0.0, .eng_max = 100.0 };
     voltage_divider_cfg_t vcfg = { .vref = ADC_VREF, .r_top_ohms = 100000.0, .r_bot_ohms = 10000.0 };
@@ -86,27 +87,31 @@ int main(void) {
 
         double tc[10], t_ma[3], t_psi[3], v[7];
 
-        // --- Thermistor Logic with NaN/Inf Guard ---
+        // --- Thermistor Logic with Defensive Guard ---
         for (int i = 0; i < 10; i++) {
             int raw = adc_read(&THERMS[i]);
-            // If ADC is 0 or 1023, the log math will produce nan/inf
-            if (raw <= 0 || raw >= 1023) {
+            // Widen check to catch noise (5-1018) to prevent 'nan' strings
+            if (raw < 5 || raw > 1018) {
                 tc[i] = 0.0;
             } else {
                 tc[i] = thermistor_c_from_adc(raw, &tcfg);
-                // Final safety check for the resulting float
-                if (isnan(tc[i]) || isinf(tc[i])) tc[i] = 0.0;
+                // Catch any remaining floating point errors
+                if (!isnormal(tc[i]) && tc[i] != 0.0) tc[i] = 0.0;
             }
         }
 
+        // --- Transducers (Kept simple as per your request) ---
         for (int i = 0; i < 3; i++) {
             t_ma[i] = transducer_from_adc(adc_read(&TRANS[i]), &icfg);
             t_psi[i] = transducer_eng_from_ma(t_ma[i], &icfg);
         }
 
-        for (int i = 0; i < 7; i++) v[i] = voltage_from_adc(adc_read(&VOLTS[i]), &vcfg);
+        // --- Voltages ---
+        for (int i = 0; i < 7; i++) {
+            v[i] = voltage_from_adc(adc_read(&VOLTS[i]), &vcfg);
+        }
 
-        // ---- Build FLAT JSON ----
+        // ---- Build FLAT JSON (Node-RED Compatible) ----
         snprintf(json, sizeof(json),
             "{"
             "\"therm1\":%.2f,\"therm2\":%.2f,\"therm3\":%.2f,\"therm4\":%.2f,\"therm5\":%.2f,"
@@ -127,12 +132,20 @@ int main(void) {
             imu_ok ? s.temp_c : 0.0
         );
 
+        // Publish to MQTT
         mosquitto_publish(mosq, NULL, MQTT_TOPIC, strlen(json), json, 0, false);
+        
+        // Loop timing
         usleep(loop_us);
     }
 
-    // Cleanup (Not reached in while(1) but good for reference)
+    // Standard Cleanup
+    if (imu_fd >= 0) mpu6050_close(imu_fd);
+    mcp3008_close(fd_adc0);
+    mcp3008_close(fd_adc1);
+    mcp3008_close(fd_adc2);
     mosquitto_destroy(mosq);
     mosquitto_lib_cleanup();
+
     return 0;
 }
