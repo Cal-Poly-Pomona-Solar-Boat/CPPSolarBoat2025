@@ -12,7 +12,7 @@
   *   - ADXL345 #2 : motor 2 vibration      (I2C3, addr 0x1D / 0x3A)
   *   - Hall sensor #1 : motor RPM          (PA0, EXTI0)
   *   - Hall sensor #2 : motor RPM          (PA1, EXTI1)
-  *   - Throttle : 0-5V mapping             (PC0, ADC1)
+  *   - Throttle : 0-5V mapping             (PC1, ADC1)
   *
   * CAN FD TX frames (built and sent via can_frames.c):
   *   ID 0x040  — steering              (AS5600 #1)  2 bytes   @ 500 Hz  (2ms)
