@@ -5,9 +5,9 @@
   * @brief          : Sensor Hub + FDCAN Transmit — STM32G474RE
   *
   * Sensors:
-  *   - AS5600 #1 : magnetic steering angle (I2C3, addr 0x36)
-  *   - AS5600 #2 : magnetic steering angle (I2C4, addr 0x36)
-  *   - AS5600 #3 : magnetic steering angle (I2C2, addr 0x36)
+  *   - AS5600 #1 : magnetic steering angle (I2C3, addr 0x36) - Steering Input
+  *   - AS5600 #2 : magnetic steering angle (I2C4, addr 0x36) - Left Rudder Position
+  *   - AS5600 #3 : magnetic steering angle (I2C2, addr 0x36) - Right Rudder Position
   *   - ADXL345 #1 : motor 1 vibration      (I2C3, addr 0x53 / 0xA6)
   *   - ADXL345 #2 : motor 2 vibration      (I2C3, addr 0x1D / 0x3A)
   *   - Hall sensor #1 : motor RPM          (PA0, EXTI0)
