@@ -1,6 +1,6 @@
 # Solar Boat Telemetry System
 
-A three-layer real-time telemetry system for a solar boat. Raw physical signals are acquired on an STM32G474RE microcontroller, transmitted over CAN FD to a Raspberry Pi gateway, and fanned out into a live Node-RED dashboard and InfluxDB time-series database.
+A three-layer real-time telemetry system for the CPP Solar Boat. Raw physical signals are acquired on an STM32G474RE microcontroller, transmitted over CAN FD to a Raspberry Pi gateway, and fanned out into a live Node-RED dashboard and InfluxDB time-series database.
 
 ---
 
