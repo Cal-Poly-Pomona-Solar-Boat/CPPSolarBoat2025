@@ -5,14 +5,23 @@ A three-layer real-time telemetry system for a solar boat. Raw physical signals 
 ---
 
 ## Repository structure
+
+```
 ├── STM32/
-│   └── main.c              # Sensor hub — AS5600, ADXL345, Hall, ADC, CAN FD TX
-│   └── can_frames.c        # CAN FD frame builders
+│   ├── main.c              # Sensor hub — scheduler, ISRs, sensor reads
+│   ├── can_frames.c        # CAN FD frame builders and transmit functions
+│   └── can_frames.h        # Frame ID map and function declarations
 ├── Pi/
-│   └── main.c              # C sensor daemon — MCP3008, MPU6050, MQTT publish
+│   ├── main.c              # C sensor daemon — MCP3008, MPU6050, MQTT publish
+│   ├── mcp3008.c           # SPI driver for MCP3008 ADC
+│   ├── mpu6050.c           # I2C driver for MPU6050 IMU
+│   ├── thermistor.c        # Steinhart-Hart beta model temperature conversion
+│   ├── transducer_4_20ma.c # 4-20mA current loop to engineering units
+│   └── voltage_divider.c   # Voltage divider ADC to real voltage conversion
 ├── NodeRED/
 │   └── flows.json          # Node-RED flows — CAN decode, dashboard, InfluxDB
 └── README.md
+```
 
 ---
 
@@ -50,11 +59,11 @@ graph TD
 
 ---
 
-## Layer 1 — STM32G474RE sensor hub (`STM32/main.c`)
+## Layer 1 — STM32G474RE sensor hub (`STM32/main.c` + `STM32/can_frames.c`)
 
 The main loop uses a non-blocking `HAL_GetTick()` timestamp pattern. Each sensor has its own `last_tick_*` variable and fires independently when its interval elapses. There are no RTOS tasks or DMA — everything runs cooperatively in a single `while(1)`.
 
-The Hall RPM path is the only genuinely interrupt-driven path. It runs entirely outside the main loop via `EXTI0` and `EXTI1` ISRs, so motor speed measurement is never blocked by I2C reads.
+The Hall RPM path is the only genuinely interrupt-driven path. It runs entirely outside the main loop via `EXTI0` and `EXTI1` ISRs so motor speed measurement is never blocked by I2C reads.
 
 ### Scheduling model
 
@@ -101,9 +110,9 @@ graph TD
 | Hall sensor #2 | PA1 · EXTI1 | Right motor RPM | ISR-driven (1000 Hz TX) |
 | ADC1 · CH7 | PC1 | Throttle (0–3.3 V) | 50 Hz |
 
-### CAN FD frame map
+### CAN FD frame map (`STM32/can_frames.c`)
 
-All frames use `uint16_t` big-endian packing. Angles scaled ×10, voltages ×1000, RPM ×10. Vibration frames are 1-byte booleans. Frame format is `FDCAN_FRAME_FD_NO_BRS`, standard IDs.
+All frames are built and transmitted in `can_frames.c`. Each function receives a sensor value, packs it big-endian into a byte array, and calls `HAL_FDCAN_AddMessageToTxFifoQ`. TX failures print a UART message but do not call `Error_Handler` — the main loop always continues regardless of CAN bus status.
 
 ```mermaid
 graph LR
@@ -129,27 +138,36 @@ graph LR
         F8["0x2C8 - throttle - V x1000 - 50 Hz"]
     end
 
-    S1 --> F1
-    S2 --> F2
-    S3 --> F3
-    S4 --> F4
-    S5 --> F5
-    S6 --> F6
-    S7 --> F7
-    S8 --> F8
+    S1 -->|can_tx_steering1| F1
+    S2 -->|can_tx_steering2| F2
+    S3 -->|can_tx_steering3| F3
+    S4 -->|can_tx_adxl1| F4
+    S5 -->|can_tx_adxl2| F5
+    S6 -->|can_tx_rpm| F6
+    S7 -->|can_tx_rpm2| F7
+    S8 -->|can_tx_throttle| F8
 ```
+
+**Encoding examples from `can_frames.h`:**
+
+| Signal | Scaling | Example |
+|---|---|---|
+| Angle (degrees) | `deg * 10` as `uint16` | 270.5° → 2705 → `[0x0A, 0x91]` |
+| RPM | `rpm * 10` as `uint16` | 123.4 RPM → 1234 → `[0x04, 0xD2]` |
+| Voltage | `voltage * 1000` as `uint16` | 2.500 V → 2500 → `[0x09, 0xC4]` |
+| Vibration | 1-byte boolean | 0 = safe, 1 = unsafe |
 
 ### Vibration processing
 
-The ADXL345 sensors accumulate 10 samples into a rolling buffer at 1 ms intervals (controlled by `ADXL_SAMPLE_INTERVAL_MS = RATE_MOTOR_VIBRATION_MS / ADXL_SAMPLES`). On every 10th sample the standard deviation of each axis is computed and compared to `ADXL_THRESH = 0.08g`. The result is a single `uint8_t` boolean transmitted as the CAN payload. This deliberately decouples the 1 ms sampling rate from the 10 ms reporting rate — high-frequency events are captured without flooding the CAN bus.
+The ADXL345 sensors accumulate 10 samples into a rolling buffer at 1 ms intervals (controlled by `ADXL_SAMPLE_INTERVAL_MS = RATE_MOTOR_VIBRATION_MS / ADXL_SAMPLES`). On every 10th sample the standard deviation of each axis is computed and compared to `ADXL_THRESH = 0.08g`. The result is a single `uint8_t` boolean transmitted via `can_tx_adxl1` / `can_tx_adxl2`. This deliberately decouples the 1 ms sampling rate from the 10 ms reporting rate — high-frequency events are captured without flooding the CAN bus.
 
 ### RPM measurement
 
-Hall sensor edges trigger `HAL_GPIO_EXTI_Callback` on `PA0` and `PA1`. Each ISR reads TIM2's free-running 32-bit counter (170 MHz / prescaler 169 ≈ 1 MHz), computes the pulse-to-pulse period, derives RPM, and maintains a 5-sample rolling average in `rpm_1_buffer` / `rpm_2_buffer`. A 3-second timeout (`RPM_TIMEOUT = 3000000` microseconds) zeroes the reading if no pulse arrives, signalling a stopped motor. A minimum pulse gap of `5000` ticks debounces mechanical noise.
+Hall sensor edges trigger `HAL_GPIO_EXTI_Callback` on `PA0` and `PA1`. Each ISR reads TIM2's free-running 32-bit counter (170 MHz / prescaler 169 ≈ 1 MHz), computes the pulse-to-pulse period, derives RPM, and maintains a 5-sample rolling average in `rpm_1_buffer` / `rpm_2_buffer`. A 3-second timeout (`RPM_TIMEOUT = 3000000` microseconds) zeroes the reading if no pulse arrives. A minimum pulse gap of 5000 ticks debounces mechanical noise. RPM is then transmitted via `can_tx_rpm` / `can_tx_rpm2`.
 
 ---
 
-## Layer 2 — Raspberry Pi gateway
+## Layer 2 — Raspberry Pi gateway (`Pi/`)
 
 Two independent data paths run in parallel.
 
@@ -163,13 +181,13 @@ graph TD
     end
 
     subgraph PathB["Path B - Pi sensors"]
-        B1[MCP3008 x3 - SPI ADC]
-        B2[MPU6050 - I2C IMU]
-        B3[C daemon - 2 Hz loop]
-        B4[thermistor temp - Steinhart-Hart]
-        B5[transducer pressure - 4 to 20mA]
-        B6[voltage divider readings]
-        B7[MQTT publish - pi/sensors]
+        B1[MCP3008 x3 - SPI - mcp3008.c]
+        B2[MPU6050 - I2C - mpu6050.c]
+        B3[C daemon main loop - 2 Hz]
+        B4[thermistor.c - Steinhart-Hart beta]
+        B5[transducer_4_20ma.c - 4 to 20mA]
+        B6[voltage_divider.c - divider ratio]
+        B7[MQTT publish - pi/sensors JSON]
         B8[mqtt-in Node-RED node]
     end
 
@@ -181,7 +199,16 @@ graph TD
 
 **Path A — CAN FD:** The `socketcan-out` Node-RED node reads raw frames from `can0`. The `CAN-Decoding` function node switches on the CAN ID and deserialises each frame into a structured JavaScript object with named fields (`degrees`, `rpm`, `voltage`, `is_unsafe`). The decoded object is broadcast via `link out` nodes to both the dashboard and InfluxDB flows.
 
-**Path B — Pi sensors:** The C daemon (`Pi/main.c`) reads three MCP3008 ADCs over SPI and an MPU6050 IMU over I2C at 2 Hz. It computes thermistor temperatures using the Steinhart–Hart β model, 4–20 mA transducer pressures, and voltage-divider readings, then publishes a single JSON string to MQTT topic `pi/sensors` via libmosquitto. A `mqtt-in` Node-RED node subscribes and feeds the data downstream.
+**Path B — Pi sensors:** The C daemon (`Pi/main.c`) runs a 2 Hz loop reading three MCP3008 ADCs over SPI (`mcp3008.c`) and an MPU6050 IMU over I2C (`mpu6050.c`). Sensor values are converted using dedicated modules:
+
+| Module | Input | Conversion | Output |
+|---|---|---|---|
+| `thermistor.c` | ADC counts | Steinhart-Hart β model | Temperature °C |
+| `transducer_4_20ma.c` | ADC counts | V / shunt → mA → engineering units | Pressure PSI |
+| `voltage_divider.c` | ADC counts | Vnode × (R_top + R_bot) / R_bot | Real voltage V |
+| `mpu6050.c` | Raw I2C registers | accel / 16384 · gyro / 131 | g and dps |
+
+All values are serialised into a single JSON string and published to MQTT topic `pi/sensors` via libmosquitto. A `mqtt-in` Node-RED node subscribes and feeds the data downstream.
 
 ---
 
@@ -214,11 +241,11 @@ graph TD
 
 **Dashboard routing.** The `CAN-Routing` switch node inspects `msg.payload.signal` and fans the stream to eight dedicated UI widgets — half-gauges for the three angle signals and both RPM signals, Vue template components for the two vibration status indicators (green/red), and a vertical bar template for throttle voltage.
 
-**Pi sensor decoding.** The `piSensors` function node parses the JSON payload and emits 28 separate output messages wired to `ui-text` nodes for temperatures, pressures, voltages, and IMU values. Output 28 is a pre-formatted Stackhero InfluxDB write message.
+**Pi sensor decoding.** The `piSensors` function node parses the JSON payload published by the C daemon and emits 28 separate output messages wired to `ui-text` nodes for temperatures, pressures, voltages, and IMU values. Output 28 is a pre-formatted Stackhero InfluxDB write message.
 
 **Notable dashboard components:**
 - Battery bar — SVG `clip-path` scaled by `msg.payload` percentage, tri-colour fill (red → amber → green)
-- Boat attitude indicator — artificial horizon driven by real IMU roll/pitch, SVG `rotate()` and `translate` applied reactively via Vue watchers
+- Boat attitude indicator — artificial horizon driven by real IMU roll/pitch from `mpu6050.c`, SVG `rotate()` and `translate` applied reactively via Vue watchers
 
 ### InfluxDB write rate limiting
 
@@ -241,7 +268,7 @@ graph TD
     NOTE["Without limiter: RPM alone = 86 million points per day"]
 ```
 
-The `PrepCanForInflux` function node applies per-signal rate limiting using node context timestamps. Without this, 1000 Hz RPM frames would write ~86 million points per day into InfluxDB. At 10 Hz the same signal contributes ~864,000 points — a manageable time-series density. Pi sensor data is written under a separate measurement `PI_sensor_data` tagged with `device: raspberry_pi`.
+The `PrepCanForInflux` function node applies per-signal rate limiting using node context timestamps. Pi sensor data is written under a separate measurement `PI_sensor_data` tagged with `device: raspberry_pi` and `source: c_program`.
 
 ---
 
@@ -250,8 +277,10 @@ The `PrepCanForInflux` function node applies per-signal rate limiting using node
 | Decision | Reason |
 |---|---|
 | Non-blocking `HAL_GetTick()` scheduler | No RTOS needed — sensors fire independently without blocking each other |
-| Hall RPM via EXTI ISR, not main loop | Guarantees microsecond-accurate pulse timing regardless of I2C bus load |
+| Hall RPM via EXTI ISR not main loop | Guarantees microsecond-accurate pulse timing regardless of I2C bus load |
 | ADXL 10-sample buffer before reporting | Decouples 1 ms sampling from 10 ms CAN TX — captures events without flooding the bus |
-| `uint16_t` ×10 / ×1000 fixed-point encoding | Avoids floating point in CAN payloads while preserving one decimal place of precision |
-| InfluxDB write-rate limiter in node context | Reduces 86M points/day to ~864K points/day for RPM without losing resolution on the dashboard |
+| `uint16_t` ×10 / ×1000 fixed-point encoding in `can_frames.c` | Avoids floating point in CAN payloads while preserving one decimal place of precision |
+| CAN TX failures print not Error_Handler | Main loop always continues — a busy CAN bus does not halt the sensor hub |
+| Separate modules for each Pi sensor type | `thermistor.c`, `transducer_4_20ma.c`, `voltage_divider.c` are independently testable |
 | MQTT for Pi sensor data | Decouples the C daemon from Node-RED — either can restart independently |
+| InfluxDB write-rate limiter in node context | Reduces 86M points/day to ~864K points/day for RPM without losing dashboard resolution |
