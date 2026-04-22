@@ -223,7 +223,7 @@ static uint32_t last_tick_motor_rpmRight        = 0;
  *                         During this window pulses are suppressed so the
  *                         driver sees a clean DIR edge before the next step.
  * ---------------------------------------------------------------- */
-#define STEP_RATE_MAX            40000.0f
+#define STEP_RATE_MAX            60000.0f
 #define STEP_RATE_MIN            200.0f
 #define RAMP_UP_SLEW             800.0f    /* Hz per 2 ms tick */
 #define RAMP_DOWN_SLEW           2000.0f   /* Hz per 2 ms tick */
@@ -246,18 +246,29 @@ static uint32_t last_tick_motor_rpmRight        = 0;
 #define WHEEL_DEG_RANGE          35.0f
 
 /* PID deadband and integral zone */
-#define STEER_DEADBAND_DEG       0.5f    /* widen slightly — ±0.5 deg is sub-mm at rudder */
+#define STEER_DEADBAND_DEG       1.0f    /* inside this band -> hard zero command */
 #define STEER_INT_ZONE_DEG       5.0f
 
 /* PID gains
- * Kp = 800: at 1 deg error -> 800 Hz pulse rate (well above MIN, below MAX)
- *           at 0.5 deg (deadband edge) -> 400 Hz -> motor is barely creeping in
- * Ki = 20 : light integral to trim steady-state without windup
- * Kd = 10 : damp overshoot so motor doesn't oscillate past target
+ * The PID output is in pulse/s (Hz) fed directly to the stepper driver.
+ * Output range: -STEP_RATE_MAX to +STEP_RATE_MAX.
+ *
+ * Kp = 1200: at 35 deg (full lock) -> 42000 Hz (clamped to 40000)
+ *            at  5 deg             ->  6000 Hz
+ *            at  1 deg (deadband)  ->  1200 Hz -> ramps down and stops
+ *            at  0.5 deg           ->   600 Hz -> below STEP_RATE_MIN -> zero
+ * Ki = 10  : very light — only corrects steady-state offset, no windup
+ * Kd = 5   : small damping, prevents oscillation near target
+ *
+ * STEER_OUTPUT_FLOOR: PID outputs below this are forced to 0.
+ * This creates a natural stop zone just outside the deadband — the motor
+ * slows proportionally and the output falls below the floor before the
+ * deadband is reached, so the ramp-down completes smoothly.
  */
-#define STEER_KP                 800.0f
-#define STEER_KI                 20.0f
-#define STEER_KD                 10.0f
+#define STEER_KP                 1200.0f
+#define STEER_KI                 10.0f
+#define STEER_KD                 5.0f
+#define STEER_OUTPUT_FLOOR       STEP_RATE_MIN  /* outputs below this -> zero */
 
 typedef struct
 {
@@ -936,23 +947,35 @@ int main(void)
             /* ---- Step 4: Error → PID → stepper rate ---- */
             steering_error_deg = steering_cmd_deg - steering_fb_deg;
 
-            /*
-             * Deadband: inside ±0.3 deg the motor stops completely and
-             * the integrator is slowly bled to zero to prevent dither.
-             */
             if (fabsf(steering_error_deg) < STEER_DEADBAND_DEG)
             {
+                /*
+                 * Inside deadband — command zero to both drivers.
+                 * The ramp-down logic in steering_apply_output() will
+                 * decelerate the motors smoothly to a full stop.
+                 * Bleed the integrator so it doesn't fight the next move.
+                 */
                 steering_error_deg  = 0.0f;
-                steer_pid.integral *= 0.90f;  // gentle integrator bleed
-                /* Pass zero — both apply functions ramp down gracefully */
+                steer_pid.integral *= 0.90f;
                 steering_apply_output(0.0f);
                 steering_apply_output_right(0.0f);
             }
             else
             {
                 step_rate_cmd = pid_update(&steer_pid, steering_error_deg, dt);
-                steering_apply_output      (step_rate_cmd);   // left  DM860I
-                steering_apply_output_right(step_rate_cmd);   // right DM860I
+
+                /*
+                 * Output floor: if the PID output magnitude is below
+                 * STEP_RATE_MIN the motor cannot meaningfully step at
+                 * that speed — clamp it to zero so the ramp-down fires
+                 * instead of leaving the motor spinning at a whisper speed.
+                 * This closes the gap between deadband and STEP_RATE_MIN.
+                 */
+                if (fabsf(step_rate_cmd) < STEER_OUTPUT_FLOOR)
+                    step_rate_cmd = 0.0f;
+
+                steering_apply_output(step_rate_cmd);
+                steering_apply_output_right(step_rate_cmd);
             }
 
             /* ---- Debug print @ 10 Hz ---- */
