@@ -81,10 +81,10 @@ static uint32_t last_tick_steering_ctrl = 0;
 
 #define STEP_RATE_MAX             8000.0f     // PID output scale ceiling
 
-#define PULSE_FREQ_TARGET         133333.0f   // Hz = 250 RPM output shaft
+#define PULSE_FREQ_TARGET         26667.0f   // Hz = 50 RPM output shaft
 #define PULSE_FREQ_START            2000.0f   // Hz — jump-start on first move
 #define PULSE_FREQ_MIN               500.0f   // Hz — below this, stop motor
-#define PULSE_FREQ_MAX            133333.0f   // Hz — hard cap
+#define PULSE_FREQ_MAX            26667.0f   // Hard cap at 1000 motor RPM
 
 #define RAMP_ACCEL_HZ_PER_TICK      533.0f   // Hz added/removed per 2 ms tick
 
