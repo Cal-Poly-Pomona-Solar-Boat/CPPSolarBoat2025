@@ -24,6 +24,7 @@
 *   - Direct step-rate command in pulses/sec
 *   - STEP_RATE_MAX = 60000.0f
 *   - Asymmetric ramp up / ramp down
+*   - Faster smooth stop tuning
 *   - Non-blocking enable settle and direction-change settle
 *   - 50% duty pulse output
 *   - Immediate timer update using EGR=UG
@@ -158,7 +159,7 @@ static uint32_t last_tick_motor_rpmRight       = 0;
 #define STEP_RATE_MAX                60000.0f
 #define STEP_RATE_MIN                200.0f
 #define RAMP_UP_SLEW                 800.0f      /* pulse/s added per 2 ms tick */
-#define RAMP_DOWN_SLEW               2000.0f     /* pulse/s removed per 2 ms tick */
+#define RAMP_DOWN_SLEW               6000.0f     /* faster smooth stop */
 #define DIR_CHANGE_RAMP_HZ           2000.0f
 #define DIR_CHANGE_SETTLE_MS         2U
 #define STEPPER_ENABLE_SETTLE_MS     5U
@@ -169,12 +170,12 @@ static uint32_t last_tick_motor_rpmRight       = 0;
 #define WHEEL_DEG_RANGE              35.0f
 
 /* PID / control shaping */
-#define STEER_DEADBAND_DEG           1.0f
+#define STEER_DEADBAND_DEG           2.0f
 #define STEER_INT_ZONE_DEG           5.0f
-#define STEER_KP                     1200.0f
+#define STEER_KP                     1000.0f
 #define STEER_KI                     10.0f
 #define STEER_KD                     5.0f
-#define STEER_OUTPUT_FLOOR           STEP_RATE_MIN
+#define STEER_OUTPUT_FLOOR           800.0f
 
 typedef struct
 {
