@@ -35,6 +35,26 @@
 *   3. Feedback polling rate changed to 2 ms to match control loop — FIXED
 *   4. PID anti-windup: zero-crossing integral reset + deadband bleed — FIXED
 *   5. STEP_RATE_MAX tuned for 70 deg travel in < 1 s at 1600 pulse/rev — FIXED
+*
+* FIXES from Sean's bench testing (Discord):
+*   6. PWM duty cycle corrected to 50% on both steppers — FIXED
+*      (was arr/10 = 10%; DM860I PUL input requires 50% duty for reliable detection)
+*   7. Enable signal now asserted BEFORE PWM starts, with 5 ms settle delay — FIXED
+*      (intermittent start failures caused by enable/pulse race condition)
+*   8. Trapezoidal ramp enforced at first-enable for both drivers — FIXED
+*      (instant jump to cruise frequency causes stall — must ramp up and ramp down)
+*   9. STEP_RATE_MAX raised to 40000 Hz — bench-verified on function generator — FIXED
+*  10. STEP_RATE_SLEW tuned to produce smooth trapezoidal ramp profile — FIXED
+*
+* THIS VERSION — motion control overhaul:
+*  11. Separate RAMP_UP_SLEW (800 Hz/tick) and RAMP_DOWN_SLEW (2000 Hz/tick) — FIXED
+*      Faster decel ensures motor stops sharply when steering magnet stops.
+*  12. Non-blocking direction-change sequence added — FIXED
+*      On sign reversal: ramp to DIR_CHANGE_RAMP_HZ, stop pulses, flip DIR,
+*      wait DIR_CHANGE_SETTLE_MS, then ramp up in new direction.
+*      Prevents stall on sharp reversals without any dead-stop in between.
+*  13. Deadband now calls ramp-down instead of hard stepper_stop() — FIXED
+*  14. PID gains retuned: Kp=800 scales output naturally to zero as error -> 0 — FIXED
 ******************************************************************************
 */
 /* USER CODE END Header */
@@ -168,7 +188,14 @@ static uint32_t last_tick_motor_rpmRight        = 0;
  *   Gearbox       : 20:1
  *   Output deg/pulse = 360 / (1600 × 20) = 0.01125 deg
  *   Pulses for 70 deg = 70 / 0.01125 ≈ 6222 pulses
- *   At STEP_RATE_MAX = 8000 pulse/s → 6222/8000 ≈ 0.78 s  ✓
+ *
+ *   Sean bench-verified: 40 kHz pulse @ 50% duty = acceptable motor performance
+ *   At STEP_RATE_MAX = 40000 Hz:
+ *     Motor shaft RPM   = 40000 / 1600 × 60 = 1500 RPM
+ *     Output shaft RPM  = 1500 / 20 = 75 RPM  (with 20:1 gearbox)
+ *   For 250 RPM output: STEP_RATE_MAX = 250 × 20 × 1600 / 60 ≈ 133 333 Hz
+ *     → verify this is within DM860I max input frequency before increasing
+ *   STEP_RATE_SLEW = 1600 pulse/s per 2 ms tick → ~50 ms 0→40kHz ramp  ✓
  * ================================================================ */
 
 #define RATE_STEERING_CTRL_MS    2U           // control loop period (ms)
@@ -176,10 +203,35 @@ static uint32_t last_tick_motor_rpmRight        = 0;
 /* Timer clock — TIM8 and TIM15 both on APB2 = 170 MHz, prescaler 0 */
 #define TIM8_CLK_HZ              170000000.0f
 
-/* Step-rate limits */
-#define STEP_RATE_MAX            8000.0f      // pulse/s  ≈ 90 deg/s output
-#define STEP_RATE_MIN            80.0f        // below this → motor stopped
-#define STEP_RATE_SLEW           4000.0f      // max rate change per 2 ms tick
+/* ----------------------------------------------------------------
+ * Step-rate limits & ramp parameters
+ *
+ *  STEP_RATE_MAX      : 40 kHz bench-verified (1600 step/rev x 20:1 = 75 RPM out)
+ *  STEP_RATE_MIN      : below this ARR overflows the 16-bit timer
+ *  RAMP_UP_SLEW       : Hz added per 2 ms control tick on acceleration
+ *                       800 Hz/tick -> 0 to 40 kHz in 50 ticks (100 ms)
+ *  RAMP_DOWN_SLEW     : Hz removed per 2 ms tick on deceleration
+ *                       2000 Hz/tick -> 40 kHz to 0 in 20 ticks (40 ms)
+ *                       Faster than ramp-up so the motor stops sharply
+ *                       when the steering magnet stops moving.
+ *
+ * Direction-change sequence (DM860I requires DIR stable >= 5 us before pulse):
+ *  DIR_CHANGE_RAMP_HZ   : ramp down to this speed before flipping DIR.
+ *                         At ~5% of max speed the motor has low inertia
+ *                         and the direction flip cannot stall it.
+ *  DIR_CHANGE_SETTLE_MS : non-blocking settle window tracked by timestamp.
+ *                         During this window pulses are suppressed so the
+ *                         driver sees a clean DIR edge before the next step.
+ * ---------------------------------------------------------------- */
+#define STEP_RATE_MAX            40000.0f
+#define STEP_RATE_MIN            200.0f
+#define RAMP_UP_SLEW             800.0f    /* Hz per 2 ms tick */
+#define RAMP_DOWN_SLEW           2000.0f   /* Hz per 2 ms tick */
+#define DIR_CHANGE_RAMP_HZ       2000.0f   /* slow to this before flipping DIR */
+#define DIR_CHANGE_SETTLE_MS     2U        /* ms to suppress pulses after DIR flip */
+
+/* ENA settle time after asserting LOW before first pulse */
+#define STEPPER_ENABLE_SETTLE_MS  5U
 
 /* Rudder physical travel limits */
 #define RUDDER_DEG_MAX           35.0f
@@ -194,13 +246,18 @@ static uint32_t last_tick_motor_rpmRight        = 0;
 #define WHEEL_DEG_RANGE          35.0f
 
 /* PID deadband and integral zone */
-#define STEER_DEADBAND_DEG       0.3f
+#define STEER_DEADBAND_DEG       0.5f    /* widen slightly — ±0.5 deg is sub-mm at rudder */
 #define STEER_INT_ZONE_DEG       5.0f
 
-/* PID gains — tune Kp first on bench, then Ki, then Kd */
-#define STEER_KP                 200.0f
-#define STEER_KI                 40.0f
-#define STEER_KD                 8.0f
+/* PID gains
+ * Kp = 800: at 1 deg error -> 800 Hz pulse rate (well above MIN, below MAX)
+ *           at 0.5 deg (deadband edge) -> 400 Hz -> motor is barely creeping in
+ * Ki = 20 : light integral to trim steady-state without windup
+ * Kd = 10 : damp overshoot so motor doesn't oscillate past target
+ */
+#define STEER_KP                 800.0f
+#define STEER_KI                 20.0f
+#define STEER_KD                 10.0f
 
 typedef struct
 {
@@ -336,21 +393,32 @@ static uint16_t read_adc(void)
 }
 
 /* ================================================================
- * Left stepper (TIM8 CH1, PB6 PUL / PB4 DIR / PB5 ENA)
+ * Left stepper  (TIM8 CH1 — PB6 PUL / PB4 DIR / PB5 ENA)
+ *
+ * steering_apply_output() implements a non-blocking trapezoidal
+ * ramp with a safe direction-change sequence:
+ *
+ *  Normal running:
+ *    speed tracks PID output via RAMP_UP_SLEW / RAMP_DOWN_SLEW.
+ *
+ *  Direction reversal detected (sign of cmd_hz flips):
+ *    1. Decelerate to DIR_CHANGE_RAMP_HZ (still pulsing, old dir).
+ *    2. Stop pulses (CCR=0), flip DIR pin.
+ *    3. Wait DIR_CHANGE_SETTLE_MS (non-blocking timestamp gate).
+ *    4. Re-enable pulses and accelerate in new direction.
+ *
+ *  Stop (|cmd| < STEP_RATE_MIN):
+ *    Ramp down at RAMP_DOWN_SLEW, then CCR=0, ENA=HIGH.
  * ================================================================ */
 static void stepper_enable(uint8_t enable)
 {
-    /* PB5 (EN_L_Pin): LOW = driver enabled, HIGH = disabled */
     HAL_GPIO_WritePin(GPIOB, EN_L_Pin, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
-static void stepper_set_dir(float signed_rate)
+static void stepper_set_dir_pin(uint8_t positive)
 {
-    /* Flip SET/RESET here if motor runs backwards */
-    if (signed_rate >= 0.0f)
-        HAL_GPIO_WritePin(GPIOB, DIR_L_Pin, GPIO_PIN_SET);
-    else
-        HAL_GPIO_WritePin(GPIOB, DIR_L_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, DIR_L_Pin,
+                      positive ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 static void stepper_stop(void)
@@ -361,48 +429,136 @@ static void stepper_stop(void)
 
 static void stepper_set_rate(float rate_abs)
 {
+    uint32_t arr;
     if (rate_abs < STEP_RATE_MIN) { stepper_stop(); return; }
-    uint32_t arr = (uint32_t)((TIM8_CLK_HZ / rate_abs) - 1.0f);
-    if (arr < 100U)    arr = 100U;
-    if (arr > 65535U)  arr = 65535U;
+    arr = (uint32_t)((TIM8_CLK_HZ / rate_abs) - 1.0f);
+    if (arr < 100U)   arr = 100U;
+    if (arr > 65535U) arr = 65535U;
     __HAL_TIM_SET_AUTORELOAD(&htim8, arr);
-    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, arr / 10U);  // 10% duty
+    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, arr / 2U);  /* 50% duty */
     __HAL_TIM_SET_COUNTER(&htim8, 0);
-    stepper_enable(1);
 }
 
-/*
- * Apply a signed rate command to the left driver.
- * The slew limiter prevents instantaneous speed jumps that
- * would cause the motor to lose steps or stall.
- */
-static void steering_apply_output(float signed_rate_cmd)
-{
-    float delta = signed_rate_cmd - step_rate_out;
-    if (delta >  STEP_RATE_SLEW) delta =  STEP_RATE_SLEW;
-    if (delta < -STEP_RATE_SLEW) delta = -STEP_RATE_SLEW;
-    step_rate_out += delta;
+static uint8_t  stepper_left_enabled  = 0;
+static float    stepper_left_speed    = 0.0f;  /* current magnitude (Hz), always >= 0 */
+static uint8_t  stepper_left_dir      = 1;     /* 1=positive, 0=negative */
+static uint8_t  stepper_left_dir_chg  = 0;     /* 1=direction change in progress */
+static uint32_t stepper_left_dir_tick = 0;     /* timestamp of DIR flip */
 
-    if (fabsf(step_rate_out) < STEP_RATE_MIN) { stepper_stop(); return; }
-    stepper_set_dir(step_rate_out);
-    stepper_set_rate(fabsf(step_rate_out));
+static void steering_apply_output(float cmd_hz)
+{
+    /* Desired direction from PID sign */
+    uint8_t want_dir = (cmd_hz >= 0.0f) ? 1U : 0U;
+    float   target   = fabsf(cmd_hz);
+    if (target > STEP_RATE_MAX) target = STEP_RATE_MAX;
+
+    /* ---- Direction-change settle gate ---- */
+    if (stepper_left_dir_chg)
+    {
+        /* Pulses suppressed until settle window expires */
+        if ((HAL_GetTick() - stepper_left_dir_tick) < DIR_CHANGE_SETTLE_MS)
+        {
+            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+            return;
+        }
+        /* Settle done — resume pulsing in new direction */
+        stepper_left_dir_chg = 0;
+        stepper_left_speed   = STEP_RATE_MIN;   /* restart from min to ramp up */
+    }
+
+    /* ---- Direction reversal detection ---- */
+    if (target >= STEP_RATE_MIN && want_dir != stepper_left_dir)
+    {
+        if (stepper_left_speed > DIR_CHANGE_RAMP_HZ)
+        {
+            /* Still too fast — decelerate toward DIR_CHANGE_RAMP_HZ */
+            stepper_left_speed -= RAMP_DOWN_SLEW;
+            if (stepper_left_speed < DIR_CHANGE_RAMP_HZ)
+                stepper_left_speed = DIR_CHANGE_RAMP_HZ;
+            stepper_set_rate(stepper_left_speed);
+            step_rate_out = stepper_left_dir ? stepper_left_speed : -stepper_left_speed;
+            return;
+        }
+        /* Slow enough — flip DIR now */
+        __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);   /* stop pulses */
+        stepper_left_dir     = want_dir;
+        stepper_set_dir_pin(stepper_left_dir);
+        stepper_left_dir_chg  = 1;
+        stepper_left_dir_tick = HAL_GetTick();
+        stepper_left_speed    = 0.0f;
+        step_rate_out = 0.0f;
+        return;
+    }
+
+    /* ---- Normal ramp up / hold / ramp down ---- */
+    if (target < STEP_RATE_MIN)
+    {
+        /* Command is zero — ramp down and stop */
+        if (stepper_left_speed > 0.0f)
+        {
+            stepper_left_speed -= RAMP_DOWN_SLEW;
+            if (stepper_left_speed <= STEP_RATE_MIN)
+            {
+                stepper_left_speed   = 0.0f;
+                stepper_left_enabled = 0;
+                stepper_stop();
+                step_rate_out = 0.0f;
+                return;
+            }
+        }
+        else
+        {
+            stepper_left_enabled = 0;
+            stepper_stop();
+            step_rate_out = 0.0f;
+            return;
+        }
+    }
+    else if (stepper_left_speed < target)
+    {
+        stepper_left_speed += RAMP_UP_SLEW;
+        if (stepper_left_speed > target) stepper_left_speed = target;
+    }
+    else if (stepper_left_speed > target)
+    {
+        stepper_left_speed -= RAMP_DOWN_SLEW;
+        if (stepper_left_speed < target) stepper_left_speed = target;
+        if (stepper_left_speed < STEP_RATE_MIN)
+        {
+            stepper_left_speed   = 0.0f;
+            stepper_left_enabled = 0;
+            stepper_stop();
+            step_rate_out = 0.0f;
+            return;
+        }
+    }
+
+    /* First pulse of a new move — enable driver with settle */
+    if (!stepper_left_enabled)
+    {
+        stepper_set_dir_pin(stepper_left_dir);
+        stepper_enable(1);
+        HAL_Delay(STEPPER_ENABLE_SETTLE_MS);
+        stepper_left_enabled = 1;
+    }
+
+    stepper_set_rate(stepper_left_speed);
+    step_rate_out = stepper_left_dir ? stepper_left_speed : -stepper_left_speed;
 }
 
 /* ================================================================
- * Right stepper (TIM15 CH2, PB3 PUL / PB10 DIR / PC3 ENA)
+ * Right stepper  (TIM15 CH2 — PB3 PUL / PB10 DIR / PC3 ENA)
+ * Identical logic to left stepper — see comments above.
  * ================================================================ */
 static void stepper_right_enable(uint8_t enable)
 {
-    /* PC3 (EN_R_Pin): LOW = driver enabled, HIGH = disabled */
     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
-static void stepper_right_set_dir(float signed_rate)
+static void stepper_right_set_dir_pin(uint8_t positive)
 {
-    if (signed_rate >= 0.0f)
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
-    else
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10,
+                      positive ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 static void stepper_right_stop(void)
@@ -413,26 +569,114 @@ static void stepper_right_stop(void)
 
 static void stepper_right_set_rate(float rate_abs)
 {
+    uint32_t arr;
     if (rate_abs < STEP_RATE_MIN) { stepper_right_stop(); return; }
-    uint32_t arr = (uint32_t)((TIM8_CLK_HZ / rate_abs) - 1.0f);
-    if (arr < 100U)    arr = 100U;
-    if (arr > 65535U)  arr = 65535U;
+    arr = (uint32_t)((TIM8_CLK_HZ / rate_abs) - 1.0f);
+    if (arr < 100U)   arr = 100U;
+    if (arr > 65535U) arr = 65535U;
     __HAL_TIM_SET_AUTORELOAD(&htim15, arr);
-    __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, arr / 10U);  // 50% duty
+    __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, arr / 2U);  /* 50% duty */
     __HAL_TIM_SET_COUNTER(&htim15, 0);
-    stepper_right_enable(1);
 }
 
-static void steering_apply_output_right(float signed_rate_cmd)
-{
-    float delta = signed_rate_cmd - step_rate_out_right;
-    if (delta >  STEP_RATE_SLEW) delta =  STEP_RATE_SLEW;
-    if (delta < -STEP_RATE_SLEW) delta = -STEP_RATE_SLEW;
-    step_rate_out_right += delta;
+static uint8_t  stepper_right_enabled  = 0;
+static float    stepper_right_speed    = 0.0f;
+static uint8_t  stepper_right_dir      = 1;
+static uint8_t  stepper_right_dir_chg  = 0;
+static uint32_t stepper_right_dir_tick = 0;
 
-    if (fabsf(step_rate_out_right) < STEP_RATE_MIN) { stepper_right_stop(); return; }
-    stepper_right_set_dir(step_rate_out_right);
-    stepper_right_set_rate(fabsf(step_rate_out_right));
+static void steering_apply_output_right(float cmd_hz)
+{
+    uint8_t want_dir = (cmd_hz >= 0.0f) ? 1U : 0U;
+    float   target   = fabsf(cmd_hz);
+    if (target > STEP_RATE_MAX) target = STEP_RATE_MAX;
+
+    /* ---- Direction-change settle gate ---- */
+    if (stepper_right_dir_chg)
+    {
+        if ((HAL_GetTick() - stepper_right_dir_tick) < DIR_CHANGE_SETTLE_MS)
+        {
+            __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
+            return;
+        }
+        stepper_right_dir_chg = 0;
+        stepper_right_speed   = STEP_RATE_MIN;
+    }
+
+    /* ---- Direction reversal detection ---- */
+    if (target >= STEP_RATE_MIN && want_dir != stepper_right_dir)
+    {
+        if (stepper_right_speed > DIR_CHANGE_RAMP_HZ)
+        {
+            stepper_right_speed -= RAMP_DOWN_SLEW;
+            if (stepper_right_speed < DIR_CHANGE_RAMP_HZ)
+                stepper_right_speed = DIR_CHANGE_RAMP_HZ;
+            stepper_right_set_rate(stepper_right_speed);
+            step_rate_out_right = stepper_right_dir ? stepper_right_speed : -stepper_right_speed;
+            return;
+        }
+        __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
+        stepper_right_dir      = want_dir;
+        stepper_right_set_dir_pin(stepper_right_dir);
+        stepper_right_dir_chg  = 1;
+        stepper_right_dir_tick = HAL_GetTick();
+        stepper_right_speed    = 0.0f;
+        step_rate_out_right    = 0.0f;
+        return;
+    }
+
+    /* ---- Normal ramp up / hold / ramp down ---- */
+    if (target < STEP_RATE_MIN)
+    {
+        if (stepper_right_speed > 0.0f)
+        {
+            stepper_right_speed -= RAMP_DOWN_SLEW;
+            if (stepper_right_speed <= STEP_RATE_MIN)
+            {
+                stepper_right_speed   = 0.0f;
+                stepper_right_enabled = 0;
+                stepper_right_stop();
+                step_rate_out_right = 0.0f;
+                return;
+            }
+        }
+        else
+        {
+            stepper_right_enabled = 0;
+            stepper_right_stop();
+            step_rate_out_right = 0.0f;
+            return;
+        }
+    }
+    else if (stepper_right_speed < target)
+    {
+        stepper_right_speed += RAMP_UP_SLEW;
+        if (stepper_right_speed > target) stepper_right_speed = target;
+    }
+    else if (stepper_right_speed > target)
+    {
+        stepper_right_speed -= RAMP_DOWN_SLEW;
+        if (stepper_right_speed < target) stepper_right_speed = target;
+        if (stepper_right_speed < STEP_RATE_MIN)
+        {
+            stepper_right_speed   = 0.0f;
+            stepper_right_enabled = 0;
+            stepper_right_stop();
+            step_rate_out_right = 0.0f;
+            return;
+        }
+    }
+
+    if (!stepper_right_enabled)
+    {
+        stepper_right_set_dir_pin(stepper_right_dir);
+        stepper_right_enable(1);
+        HAL_Delay(STEPPER_ENABLE_SETTLE_MS);
+        stepper_right_enabled = 1;
+    }
+
+    stepper_right_set_rate(stepper_right_speed);
+    step_rate_out_right = stepper_right_dir ? stepper_right_speed : -stepper_right_speed;
 }
 
 /* ================================================================
@@ -521,15 +765,20 @@ int main(void)
     /* --- Free-running microsecond timer for RPM --- */
     HAL_TIM_Base_Start(&htim2);
 
-    /* --- Left stepper PWM (TIM8 CH1 / PB6) --- */
+    /* --- Left stepper PWM (TIM8 CH1 / PB6) ---
+     * Sean's fix #7: start with ENA de-asserted (HIGH = disabled).
+     * ENA will only be pulled LOW when a motion command actually arrives,
+     * followed by the STEPPER_ENABLE_SETTLE_MS delay. */
     HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
     __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
     stepper_enable(0);
+    stepper_left_enabled = 0;
 
     /* --- Right stepper PWM (TIM15 CH2 / PB3) --- */
     HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_2);
     __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
     stepper_right_enable(0);
+    stepper_right_enabled = 0;
 
     /* --- ADXL345 #1 init (I2C3, addr 0xA6) --- */
     HAL_I2C_Mem_Read (&hi2c3, 0xA6, 0x00, I2C_MEMADD_SIZE_8BIT, &adxl1_id,       1, HAL_MAX_DELAY);
@@ -694,11 +943,10 @@ int main(void)
             if (fabsf(steering_error_deg) < STEER_DEADBAND_DEG)
             {
                 steering_error_deg  = 0.0f;
-                steer_pid.integral *= 0.90f;  // gentle bleed, not a hard reset
-                stepper_stop();
-                stepper_right_stop();
-                step_rate_out       = 0.0f;
-                step_rate_out_right = 0.0f;
+                steer_pid.integral *= 0.90f;  // gentle integrator bleed
+                /* Pass zero — both apply functions ramp down gracefully */
+                steering_apply_output(0.0f);
+                steering_apply_output_right(0.0f);
             }
             else
             {
