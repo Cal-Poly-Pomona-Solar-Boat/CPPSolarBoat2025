@@ -1,0 +1,364 @@
+#include "main.h"
+#include "math.h"
+#include "stdio.h"
+
+/* Private variables ---------------------------------------------------------*/
+COM_InitTypeDef BspCOMInit;
+I2C_HandleTypeDef hi2c2;
+I2C_HandleTypeDef hi2c3;
+I2C_HandleTypeDef hi2c4;
+TIM_HandleTypeDef htim8;
+TIM_HandleTypeDef htim15;
+
+/* USER CODE BEGIN PV */
+
+/* ---------- AS5600 variables ---------- */
+uint8_t  steering_data[2];
+uint16_t steering_raw = 0;
+float    steering_deg = 0.0f;
+
+uint8_t  stepper_feedbackLeft_data[2];
+uint16_t stepper_feedbackLeft_raw = 0;
+float    stepper_feedbackLeft_deg = 0.0f;
+
+uint8_t  stepper_feedbackRight_data[2];
+uint16_t stepper_feedbackRight_raw = 0;
+float    stepper_feedbackRight_deg = 0.0f;
+
+/* ---------- Timing ---------- */
+#define RATE_STEERING_MS         2U
+#define RATE_STEPPER_FB_MS       5U
+#define RATE_STEERING_CTRL_MS    2U
+
+static uint32_t last_tick_steering              = 0;
+static uint32_t last_tick_stepper_feedbackLeft  = 0;
+static uint32_t last_tick_stepper_feedbackRight = 0;
+static uint32_t last_tick_steering_ctrl         = 0;
+
+/* ---------- Stepper / PID ---------- */
+#define TIM_CLK_HZ               170000000.0f
+#define STEP_RATE_MAX            50000.0f
+#define STEP_RATE_MIN            150.0f
+#define STEP_RATE_SLEW           10000.0f
+
+#define STEER_DEADBAND_DEG       0.4f
+#define STEER_INT_ZONE_DEG       10.0f
+
+#define STEER_KP                 180.0f
+#define STEER_KI                 6.0f
+#define STEER_KD                 20.0f
+
+typedef struct
+{
+    float kp;
+    float ki;
+    float kd;
+    float integral;
+    float prev_error;
+    float out_min;
+    float out_max;
+    float int_min;
+    float int_max;
+} PID_t;
+
+static PID_t steer_pid =
+{
+    .kp = STEER_KP,
+    .ki = STEER_KI,
+    .kd = STEER_KD,
+    .integral = 0.0f,
+    .prev_error = 0.0f,
+    .out_min = -STEP_RATE_MAX,
+    .out_max =  STEP_RATE_MAX,
+    .int_min = -3000.0f,
+    .int_max =  3000.0f
+};
+
+static float steering_cmd_deg      = 0.0f;
+static float steering_fb_deg       = 0.0f;
+static float steering_error_deg    = 0.0f;
+static float step_rate_cmd         = 0.0f;
+static float step_rate_out         = 0.0f;
+static float step_rate_out_right   = 0.0f;
+
+/* USER CODE END PV */
+
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_I2C3_Init(void);
+static void MX_I2C4_Init(void);
+static void MX_I2C2_Init(void);
+static void MX_TIM8_Init(void);
+static void MX_TIM15_Init(void);
+
+/* USER CODE BEGIN 0 */
+
+static float clampf(float x, float min_val, float max_val)
+{
+    if (x < min_val) return min_val;
+    if (x > max_val) return max_val;
+    return x;
+}
+
+static float angle_wrap_360(float deg)
+{
+    while (deg >= 360.0f) deg -= 360.0f;
+    while (deg < 0.0f) deg += 360.0f;
+    return deg;
+}
+
+static float angle_error_deg_fn(float target, float feedback)
+{
+    float err = target - feedback;
+    while (err > 180.0f)  err -= 360.0f;
+    while (err < -180.0f) err += 360.0f;
+    return err;
+}
+
+static float circular_mean_deg(float a_deg, float b_deg)
+{
+    float a_rad = a_deg * (float)M_PI / 180.0f;
+    float b_rad = b_deg * (float)M_PI / 180.0f;
+    float x = cosf(a_rad) + cosf(b_rad);
+    float y = sinf(a_rad) + sinf(b_rad);
+    float mean = atan2f(y, x) * 180.0f / (float)M_PI;
+    return angle_wrap_360(mean);
+}
+
+static float pid_update(PID_t *pid, float error, float dt)
+{
+    float derivative;
+    float output;
+
+    if (fabsf(error) < STEER_INT_ZONE_DEG)
+    {
+        pid->integral += error * pid->ki * dt;
+        pid->integral = clampf(pid->integral, pid->int_min, pid->int_max);
+    }
+
+    derivative = (error - pid->prev_error) / dt;
+    output = (pid->kp * error) + pid->integral + (pid->kd * derivative);
+    output = clampf(output, pid->out_min, pid->out_max);
+    pid->prev_error = error;
+
+    return output;
+}
+
+/* ---------- Left stepper ---------- */
+static void stepper_enable(uint8_t enable)
+{
+    HAL_GPIO_WritePin(GPIOB, EN_L_Pin, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
+}
+
+static void stepper_set_dir(float signed_rate)
+{
+    if (signed_rate >= 0.0f)
+        HAL_GPIO_WritePin(GPIOB, DIR_L_Pin, GPIO_PIN_SET);
+    else
+        HAL_GPIO_WritePin(GPIOB, DIR_L_Pin, GPIO_PIN_RESET);
+}
+
+static void stepper_stop(void)
+{
+    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+    stepper_enable(0);
+}
+
+static void stepper_set_rate(float rate_abs)
+{
+    if (rate_abs < STEP_RATE_MIN)
+    {
+        stepper_stop();
+        return;
+    }
+
+    uint32_t arr = (uint32_t)((TIM_CLK_HZ / rate_abs) - 1.0f);
+    if (arr < 100U) arr = 100U;
+    if (arr > 65535U) arr = 65535U;
+
+    __HAL_TIM_SET_AUTORELOAD(&htim8, arr);
+    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, arr / 2U);
+    __HAL_TIM_SET_COUNTER(&htim8, 0);
+
+    stepper_enable(1);
+}
+
+static void steering_apply_output(float signed_rate_cmd)
+{
+    float delta = signed_rate_cmd - step_rate_out;
+
+    if (delta > STEP_RATE_SLEW) delta = STEP_RATE_SLEW;
+    if (delta < -STEP_RATE_SLEW) delta = -STEP_RATE_SLEW;
+
+    step_rate_out += delta;
+
+    if (fabsf(step_rate_out) < STEP_RATE_MIN)
+    {
+        stepper_stop();
+        return;
+    }
+
+    stepper_set_dir(step_rate_out);
+    stepper_set_rate(fabsf(step_rate_out));
+}
+
+/* ---------- Right stepper ---------- */
+static void stepper_right_enable(uint8_t enable)
+{
+    HAL_GPIO_WritePin(GPIOC, EN_R_Pin, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
+}
+
+static void stepper_right_set_dir(float signed_rate)
+{
+    if (signed_rate >= 0.0f)
+        HAL_GPIO_WritePin(GPIOB, DIR_R_Pin, GPIO_PIN_SET);
+    else
+        HAL_GPIO_WritePin(GPIOB, DIR_R_Pin, GPIO_PIN_RESET);
+}
+
+static void stepper_right_stop(void)
+{
+    __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
+    stepper_right_enable(0);
+}
+
+static void stepper_right_set_rate(float rate_abs)
+{
+    if (rate_abs < STEP_RATE_MIN)
+    {
+        stepper_right_stop();
+        return;
+    }
+
+    uint32_t arr = (uint32_t)((TIM_CLK_HZ / rate_abs) - 1.0f);
+    if (arr < 100U) arr = 100U;
+    if (arr > 65535U) arr = 65535U;
+
+    __HAL_TIM_SET_AUTORELOAD(&htim15, arr);
+    __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, arr / 2U);
+    __HAL_TIM_SET_COUNTER(&htim15, 0);
+
+    stepper_right_enable(1);
+}
+
+static void steering_apply_output_right(float signed_rate_cmd)
+{
+    float delta = signed_rate_cmd - step_rate_out_right;
+
+    if (delta > STEP_RATE_SLEW)  delta = STEP_RATE_SLEW;
+    if (delta < -STEP_RATE_SLEW) delta = -STEP_RATE_SLEW;
+
+    step_rate_out_right += delta;
+
+    if (fabsf(step_rate_out_right) < STEP_RATE_MIN)
+    {
+        stepper_right_stop();
+        return;
+    }
+
+    stepper_right_set_dir(step_rate_out_right);
+    stepper_right_set_rate(fabsf(step_rate_out_right));
+}
+
+/* ---------- AS5600 read helper ---------- */
+static uint8_t read_as5600_deg(I2C_HandleTypeDef *hi2c, float *deg_out)
+{
+    uint8_t msb, lsb;
+    uint16_t raw;
+
+    if (HAL_I2C_Mem_Read(hi2c, 0x36 << 1, 0x0E, I2C_MEMADD_SIZE_8BIT, &msb, 1, HAL_MAX_DELAY) != HAL_OK)
+        return 0;
+    if (HAL_I2C_Mem_Read(hi2c, 0x36 << 1, 0x0F, I2C_MEMADD_SIZE_8BIT, &lsb, 1, HAL_MAX_DELAY) != HAL_OK)
+        return 0;
+
+    raw = (((uint16_t)msb & 0x0F) << 8) | lsb;
+    *deg_out = (raw * 360.0f) / 4096.0f;
+
+    return 1;
+}
+
+/* USER CODE END 0 */
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+
+    MX_GPIO_Init();
+    MX_I2C3_Init();
+    MX_I2C4_Init();
+    MX_I2C2_Init();
+    MX_TIM8_Init();
+    MX_TIM15_Init();
+
+    /* USER CODE BEGIN 2 */
+    HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
+    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+    stepper_enable(0);
+
+    HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_2);
+    __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
+    stepper_right_enable(0);
+    /* USER CODE END 2 */
+
+    while (1)
+    {
+        uint32_t now = HAL_GetTick();
+
+        /* AS5600 #1 steering input */
+        if (now - last_tick_steering >= RATE_STEERING_MS)
+        {
+            read_as5600_deg(&hi2c3, &steering_deg);
+            last_tick_steering = now;
+        }
+
+        /* AS5600 #2 left feedback */
+        if (now - last_tick_stepper_feedbackLeft >= RATE_STEPPER_FB_MS)
+        {
+            read_as5600_deg(&hi2c4, &stepper_feedbackLeft_deg);
+            last_tick_stepper_feedbackLeft = now;
+        }
+
+        /* AS5600 #3 right feedback */
+        if (now - last_tick_stepper_feedbackRight >= RATE_STEPPER_FB_MS)
+        {
+            read_as5600_deg(&hi2c2, &stepper_feedbackRight_deg);
+            last_tick_stepper_feedbackRight = now;
+        }
+
+        /* closed-loop steering */
+        if (now - last_tick_steering_ctrl >= RATE_STEERING_CTRL_MS)
+        {
+            const float dt = RATE_STEERING_CTRL_MS / 1000.0f;
+
+            steering_cmd_deg   = angle_wrap_360(steering_deg);
+            steering_fb_deg    = circular_mean_deg(stepper_feedbackLeft_deg, stepper_feedbackRight_deg);
+            steering_error_deg = angle_error_deg_fn(steering_cmd_deg, steering_fb_deg);
+
+            if (fabsf(steering_error_deg) < STEER_DEADBAND_DEG)
+            {
+                steering_error_deg = 0.0f;
+            }
+
+            step_rate_cmd = pid_update(&steer_pid, steering_error_deg, dt);
+
+            steering_apply_output(step_rate_cmd);
+            steering_apply_output_right(step_rate_cmd);
+
+            static uint32_t last_print = 0;
+            if (now - last_print >= 100)
+            {
+                printf("cmd=%.2f fbL=%.2f fbR=%.2f fb=%.2f err=%.2f rate=%.1f\r\n",
+                       steering_cmd_deg,
+                       stepper_feedbackLeft_deg,
+                       stepper_feedbackRight_deg,
+                       steering_fb_deg,
+                       steering_error_deg,
+                       step_rate_cmd);
+                last_print = now;
+            }
+
+            last_tick_steering_ctrl = now;
+        }
+    }
+}
