@@ -7,9 +7,9 @@
 *                   STM32G474RE
 *
 * Sensors:
-*   - AS5600 #1 : magnetic steering angle (I2C3, addr 0x36)  ← steering wheel command
-*   - AS5600 #2 : magnetic steering angle (I2C4, addr 0x36)  ← rudder left  feedback
-*   - AS5600 #3 : magnetic steering angle (I2C2, addr 0x36)  ← rudder right feedback
+*   - AS5600 #1 : magnetic steering angle (I2C3, addr 0x36)  <- steering wheel command
+*   - AS5600 #2 : magnetic steering angle (I2C4, addr 0x36)  <- rudder left  feedback
+*   - AS5600 #3 : magnetic steering angle (I2C2, addr 0x36)  <- rudder right feedback
 *   - ADXL345 #1 : motor 1 vibration      (I2C3, addr 0x53 / 0xA6)
 *   - ADXL345 #2 : motor 2 vibration      (I2C3, addr 0x1D / 0x3A)
 *   - Hall sensor #1 : motor RPM          (PA0, EXTI0)
@@ -22,19 +22,21 @@
 *
 * Motor-control notes:
 *   - Direct step-rate command in pulses/sec
-*   - Signed slew limiting for smooth reversals
+*   - STEP_RATE_MAX = 60000.0f
+*   - Asymmetric ramp up / ramp down
+*   - Non-blocking enable settle and direction-change settle
 *   - 50% duty pulse output
 *   - Immediate timer update using EGR=UG
-*   - TIM8/TIM15 prescaler set to 169 -> 1 MHz timer clock
+*   - TIM8/TIM15 prescaler = 169 -> 1 MHz timer clock
 *   - AS5600 read uses one 2-byte transaction and masks to 12 bits
 *
 * Gearbox / pulse math:
 *   - Motor microstep setting assumed: 1600 pulses/rev
 *   - Gearbox ratio: 20:1
 *   - Output deg/pulse = 360 / (1600 * 20) = 0.01125 deg
-*   - STEP_RATE_MAX = 8000 pulse/s
-*   - Motor speed max = 8000 / 1600 * 60 = 300 RPM
-*   - Output speed max = 300 / 20 = 15 RPM
+*   - STEP_RATE_MAX = 60000 pulse/s
+*   - Motor speed max = 60000 / 1600 * 60 = 2250 RPM
+*   - Output speed max = 2250 / 20 = 112.5 RPM
 ******************************************************************************
 */
 /* USER CODE END Header */
@@ -127,22 +129,22 @@ volatile uint8_t  rpm_2_buffer_index         = 0;
 /* --- FDCAN filter --- */
 FDCAN_FilterTypeDef sFilterConfig;
 
-/* --- Send / service intervals (ms) --- */
-#define RATE_STEERING_MS              2U
-#define RATE_STEERING_CTRL_MS         2U
-#define RATE_THROTTLE_MS             20U
-#define RATE_MOTOR_VIBRATION_MS      10U
-#define RATE_MOTOR_RPM_MS             1U
-#define ADXL_SAMPLE_INTERVAL_MS      (RATE_MOTOR_VIBRATION_MS / ADXL_SAMPLES)
+/* --- Service intervals (ms) --- */
+#define RATE_STEERING_MS               2U
+#define RATE_STEERING_CTRL_MS          2U
+#define RATE_THROTTLE_MS              20U
+#define RATE_MOTOR_VIBRATION_MS       10U
+#define RATE_MOTOR_RPM_MS              1U
+#define ADXL_SAMPLE_INTERVAL_MS       (RATE_MOTOR_VIBRATION_MS / ADXL_SAMPLES)
 
 /* --- Tick timestamps --- */
-static uint32_t last_tick_steering            = 0;
-static uint32_t last_tick_steering_ctrl       = 0;
-static uint32_t last_tick_throttle            = 0;
-static uint32_t last_tick_motor_vibrationLeft = 0;
-static uint32_t last_tick_motor_vibrationRight= 0;
-static uint32_t last_tick_motor_rpmLeft       = 0;
-static uint32_t last_tick_motor_rpmRight      = 0;
+static uint32_t last_tick_steering             = 0;
+static uint32_t last_tick_steering_ctrl        = 0;
+static uint32_t last_tick_throttle             = 0;
+static uint32_t last_tick_motor_vibrationLeft  = 0;
+static uint32_t last_tick_motor_vibrationRight = 0;
+static uint32_t last_tick_motor_rpmLeft        = 0;
+static uint32_t last_tick_motor_rpmRight       = 0;
 
 /* ================================================================
  * CLOSED-LOOP STEERING CONTROL
@@ -152,22 +154,27 @@ static uint32_t last_tick_motor_rpmRight      = 0;
 #define STEP_TIM_PSC                 169U
 #define STEP_TIM_CLK_HZ              (170000000.0f / (STEP_TIM_PSC + 1.0f))   /* 1 MHz */
 
-/* Direct step-rate command in pulses/second */
-#define STEP_RATE_MAX                8000.0f
-#define STEP_RATE_MIN                80.0f
-#define STEP_RATE_SLEW_PER_TICK      4000.0f
+/* Motor rate / ramp tuning */
+#define STEP_RATE_MAX                60000.0f
+#define STEP_RATE_MIN                200.0f
+#define RAMP_UP_SLEW                 800.0f      /* pulse/s added per 2 ms tick */
+#define RAMP_DOWN_SLEW               2000.0f     /* pulse/s removed per 2 ms tick */
+#define DIR_CHANGE_RAMP_HZ           2000.0f
+#define DIR_CHANGE_SETTLE_MS         2U
+#define STEPPER_ENABLE_SETTLE_MS     5U
 
 /* Steering geometry */
 #define RUDDER_DEG_MAX               35.0f
 #define RUDDER_DEG_MIN              -35.0f
 #define WHEEL_DEG_RANGE              35.0f
 
-/* PID */
-#define STEER_DEADBAND_DEG           0.3f
+/* PID / control shaping */
+#define STEER_DEADBAND_DEG           1.0f
 #define STEER_INT_ZONE_DEG           5.0f
-#define STEER_KP                     200.0f
-#define STEER_KI                     40.0f
-#define STEER_KD                     8.0f
+#define STEER_KP                     1200.0f
+#define STEER_KI                     10.0f
+#define STEER_KD                     5.0f
+#define STEER_OUTPUT_FLOOR           STEP_RATE_MIN
 
 typedef struct
 {
@@ -202,6 +209,24 @@ static float steering_error_deg  = 0.0f;
 static float step_rate_cmd       = 0.0f;
 static float step_rate_out_left  = 0.0f;
 static float step_rate_out_right = 0.0f;
+
+/* Left motor state */
+static uint8_t  stepper_left_enabled      = 0U;
+static uint8_t  stepper_left_dir          = 1U;   /* 1=positive, 0=negative */
+static uint8_t  stepper_left_dir_chg      = 0U;
+static uint8_t  stepper_left_enable_wait  = 0U;
+static float    stepper_left_speed        = 0.0f; /* magnitude only */
+static uint32_t stepper_left_dir_tick     = 0U;
+static uint32_t stepper_left_enable_tick  = 0U;
+
+/* Right motor state */
+static uint8_t  stepper_right_enabled      = 0U;
+static uint8_t  stepper_right_dir          = 1U;
+static uint8_t  stepper_right_dir_chg      = 0U;
+static uint8_t  stepper_right_enable_wait  = 0U;
+static float    stepper_right_speed        = 0.0f;
+static uint32_t stepper_right_dir_tick     = 0U;
+static uint32_t stepper_right_enable_tick  = 0U;
 
 /* USER CODE END PV */
 
@@ -283,7 +308,7 @@ static uint16_t read_adc(void)
     return v;
 }
 
-/* ---- AS5600 helper ---- */
+/* ---- Better AS5600 helper ---- */
 static float as5600_read_deg(I2C_HandleTypeDef *hi2c, uint8_t *buf)
 {
     const uint8_t addr = (0x36 << 1);
@@ -314,95 +339,307 @@ static void step_timer_set_rate(TIM_HandleTypeDef *htim, uint32_t channel, float
     if (arr > 65535U) arr = 65535U;
 
     __HAL_TIM_SET_AUTORELOAD(htim, arr);
-    __HAL_TIM_SET_COMPARE(htim, channel, arr / 2U);
+    __HAL_TIM_SET_COMPARE(htim, channel, arr / 2U);  /* 50% duty */
     __HAL_TIM_SET_COUNTER(htim, 0);
     htim->Instance->EGR = TIM_EGR_UG;
 }
 
 /* ================================================================
- * Left stepper (TIM8 CH1, PB6 PUL / PB4 DIR / PB5 ENA)
+ * Left stepper (TIM8 CH1 / PB6 PUL / PB4 DIR / PB5 ENA)
  * ================================================================ */
 static void stepper_enable(uint8_t enable)
 {
     HAL_GPIO_WritePin(GPIOB, EN_L_Pin, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
-static void stepper_set_dir(float signed_rate)
+static void stepper_set_dir_pin(uint8_t positive)
 {
     HAL_GPIO_WritePin(GPIOB, DIR_L_Pin,
-        (signed_rate >= 0.0f) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                      positive ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 static void stepper_stop(void)
 {
     __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
     htim8.Instance->EGR = TIM_EGR_UG;
-    step_rate_out_left = 0.0f;
     stepper_enable(0);
+
+    stepper_left_enabled     = 0U;
+    stepper_left_enable_wait = 0U;
+    stepper_left_speed       = 0.0f;
+    step_rate_out_left       = 0.0f;
 }
 
-static void steering_apply_output(float signed_rate_cmd)
+static void steering_apply_output(float cmd_hz)
 {
-    float delta = signed_rate_cmd - step_rate_out_left;
+    uint32_t now = HAL_GetTick();
+    uint8_t want_dir = (cmd_hz >= 0.0f) ? 1U : 0U;
+    float target = fabsf(cmd_hz);
 
-    if (delta >  STEP_RATE_SLEW_PER_TICK) delta =  STEP_RATE_SLEW_PER_TICK;
-    if (delta < -STEP_RATE_SLEW_PER_TICK) delta = -STEP_RATE_SLEW_PER_TICK;
+    if (target > STEP_RATE_MAX) target = STEP_RATE_MAX;
 
-    step_rate_out_left += delta;
-    step_rate_out_left = clampf(step_rate_out_left, -STEP_RATE_MAX, STEP_RATE_MAX);
-
-    if (fabsf(step_rate_out_left) < STEP_RATE_MIN)
+    /* Enable settle gate */
+    if (stepper_left_enable_wait)
     {
-        stepper_stop();
+        if ((now - stepper_left_enable_tick) < STEPPER_ENABLE_SETTLE_MS)
+        {
+            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+            htim8.Instance->EGR = TIM_EGR_UG;
+            step_rate_out_left = 0.0f;
+            return;
+        }
+        stepper_left_enable_wait = 0U;
+        stepper_left_enabled = 1U;
+        if (stepper_left_speed < STEP_RATE_MIN)
+            stepper_left_speed = STEP_RATE_MIN;
+    }
+
+    /* Direction-change settle gate */
+    if (stepper_left_dir_chg)
+    {
+        if ((now - stepper_left_dir_tick) < DIR_CHANGE_SETTLE_MS)
+        {
+            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+            htim8.Instance->EGR = TIM_EGR_UG;
+            step_rate_out_left = 0.0f;
+            return;
+        }
+        stepper_left_dir_chg = 0U;
+        stepper_left_speed   = STEP_RATE_MIN;
+    }
+
+    /* Direction reversal handling */
+    if ((target >= STEP_RATE_MIN) && (want_dir != stepper_left_dir))
+    {
+        if (stepper_left_speed > DIR_CHANGE_RAMP_HZ)
+        {
+            stepper_left_speed -= RAMP_DOWN_SLEW;
+            if (stepper_left_speed < DIR_CHANGE_RAMP_HZ)
+                stepper_left_speed = DIR_CHANGE_RAMP_HZ;
+
+            if (!stepper_left_enabled && !stepper_left_enable_wait)
+            {
+                stepper_set_dir_pin(stepper_left_dir);
+                stepper_enable(1);
+                stepper_left_enable_wait = 1U;
+                stepper_left_enable_tick = now;
+                step_rate_out_left = 0.0f;
+                return;
+            }
+
+            step_timer_set_rate(&htim8, TIM_CHANNEL_1, stepper_left_speed);
+            step_rate_out_left = stepper_left_dir ? stepper_left_speed : -stepper_left_speed;
+            return;
+        }
+
+        __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+        htim8.Instance->EGR = TIM_EGR_UG;
+
+        stepper_left_dir = want_dir;
+        stepper_set_dir_pin(stepper_left_dir);
+        stepper_left_dir_chg  = 1U;
+        stepper_left_dir_tick = now;
+        stepper_left_speed    = 0.0f;
+        step_rate_out_left    = 0.0f;
         return;
     }
 
-    stepper_set_dir(step_rate_out_left);
-    stepper_enable(1);
-    step_timer_set_rate(&htim8, TIM_CHANNEL_1, fabsf(step_rate_out_left));
+    /* Normal ramp up / down */
+    if (target < STEP_RATE_MIN)
+    {
+        if (stepper_left_speed > 0.0f)
+        {
+            stepper_left_speed -= RAMP_DOWN_SLEW;
+            if (stepper_left_speed <= STEP_RATE_MIN)
+            {
+                stepper_stop();
+                return;
+            }
+        }
+        else
+        {
+            stepper_stop();
+            return;
+        }
+    }
+    else if (stepper_left_speed < target)
+    {
+        stepper_left_speed += RAMP_UP_SLEW;
+        if (stepper_left_speed > target)
+            stepper_left_speed = target;
+    }
+    else if (stepper_left_speed > target)
+    {
+        stepper_left_speed -= RAMP_DOWN_SLEW;
+        if (stepper_left_speed < target)
+            stepper_left_speed = target;
+
+        if (stepper_left_speed < STEP_RATE_MIN)
+        {
+            stepper_stop();
+            return;
+        }
+    }
+
+    if (!stepper_left_enabled && !stepper_left_enable_wait)
+    {
+        stepper_set_dir_pin(stepper_left_dir);
+        stepper_enable(1);
+        stepper_left_enable_wait = 1U;
+        stepper_left_enable_tick = now;
+        step_rate_out_left = 0.0f;
+        return;
+    }
+
+    step_timer_set_rate(&htim8, TIM_CHANNEL_1, stepper_left_speed);
+    step_rate_out_left = stepper_left_dir ? stepper_left_speed : -stepper_left_speed;
 }
 
 /* ================================================================
- * Right stepper (TIM15 CH2, PB3 PUL / PB10 DIR / PC3 ENA)
+ * Right stepper (TIM15 CH2 / PB3 PUL / PB10 DIR / PC3 ENA)
  * ================================================================ */
 static void stepper_right_enable(uint8_t enable)
 {
     HAL_GPIO_WritePin(GPIOC, EN_R_Pin, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
-static void stepper_right_set_dir(float signed_rate)
+static void stepper_right_set_dir_pin(uint8_t positive)
 {
     HAL_GPIO_WritePin(GPIOB, DIR_R_Pin,
-        (signed_rate >= 0.0f) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                      positive ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 static void stepper_right_stop(void)
 {
     __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
     htim15.Instance->EGR = TIM_EGR_UG;
-    step_rate_out_right = 0.0f;
     stepper_right_enable(0);
+
+    stepper_right_enabled     = 0U;
+    stepper_right_enable_wait = 0U;
+    stepper_right_speed       = 0.0f;
+    step_rate_out_right       = 0.0f;
 }
 
-static void steering_apply_output_right(float signed_rate_cmd)
+static void steering_apply_output_right(float cmd_hz)
 {
-    float delta = signed_rate_cmd - step_rate_out_right;
+    uint32_t now = HAL_GetTick();
+    uint8_t want_dir = (cmd_hz >= 0.0f) ? 1U : 0U;
+    float target = fabsf(cmd_hz);
 
-    if (delta >  STEP_RATE_SLEW_PER_TICK) delta =  STEP_RATE_SLEW_PER_TICK;
-    if (delta < -STEP_RATE_SLEW_PER_TICK) delta = -STEP_RATE_SLEW_PER_TICK;
+    if (target > STEP_RATE_MAX) target = STEP_RATE_MAX;
 
-    step_rate_out_right += delta;
-    step_rate_out_right = clampf(step_rate_out_right, -STEP_RATE_MAX, STEP_RATE_MAX);
-
-    if (fabsf(step_rate_out_right) < STEP_RATE_MIN)
+    if (stepper_right_enable_wait)
     {
-        stepper_right_stop();
+        if ((now - stepper_right_enable_tick) < STEPPER_ENABLE_SETTLE_MS)
+        {
+            __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
+            htim15.Instance->EGR = TIM_EGR_UG;
+            step_rate_out_right = 0.0f;
+            return;
+        }
+        stepper_right_enable_wait = 0U;
+        stepper_right_enabled = 1U;
+        if (stepper_right_speed < STEP_RATE_MIN)
+            stepper_right_speed = STEP_RATE_MIN;
+    }
+
+    if (stepper_right_dir_chg)
+    {
+        if ((now - stepper_right_dir_tick) < DIR_CHANGE_SETTLE_MS)
+        {
+            __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
+            htim15.Instance->EGR = TIM_EGR_UG;
+            step_rate_out_right = 0.0f;
+            return;
+        }
+        stepper_right_dir_chg = 0U;
+        stepper_right_speed   = STEP_RATE_MIN;
+    }
+
+    if ((target >= STEP_RATE_MIN) && (want_dir != stepper_right_dir))
+    {
+        if (stepper_right_speed > DIR_CHANGE_RAMP_HZ)
+        {
+            stepper_right_speed -= RAMP_DOWN_SLEW;
+            if (stepper_right_speed < DIR_CHANGE_RAMP_HZ)
+                stepper_right_speed = DIR_CHANGE_RAMP_HZ;
+
+            if (!stepper_right_enabled && !stepper_right_enable_wait)
+            {
+                stepper_right_set_dir_pin(stepper_right_dir);
+                stepper_right_enable(1);
+                stepper_right_enable_wait = 1U;
+                stepper_right_enable_tick = now;
+                step_rate_out_right = 0.0f;
+                return;
+            }
+
+            step_timer_set_rate(&htim15, TIM_CHANNEL_2, stepper_right_speed);
+            step_rate_out_right = stepper_right_dir ? stepper_right_speed : -stepper_right_speed;
+            return;
+        }
+
+        __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
+        htim15.Instance->EGR = TIM_EGR_UG;
+
+        stepper_right_dir = want_dir;
+        stepper_right_set_dir_pin(stepper_right_dir);
+        stepper_right_dir_chg  = 1U;
+        stepper_right_dir_tick = now;
+        stepper_right_speed    = 0.0f;
+        step_rate_out_right    = 0.0f;
         return;
     }
 
-    stepper_right_set_dir(step_rate_out_right);
-    stepper_right_enable(1);
-    step_timer_set_rate(&htim15, TIM_CHANNEL_2, fabsf(step_rate_out_right));
+    if (target < STEP_RATE_MIN)
+    {
+        if (stepper_right_speed > 0.0f)
+        {
+            stepper_right_speed -= RAMP_DOWN_SLEW;
+            if (stepper_right_speed <= STEP_RATE_MIN)
+            {
+                stepper_right_stop();
+                return;
+            }
+        }
+        else
+        {
+            stepper_right_stop();
+            return;
+        }
+    }
+    else if (stepper_right_speed < target)
+    {
+        stepper_right_speed += RAMP_UP_SLEW;
+        if (stepper_right_speed > target)
+            stepper_right_speed = target;
+    }
+    else if (stepper_right_speed > target)
+    {
+        stepper_right_speed -= RAMP_DOWN_SLEW;
+        if (stepper_right_speed < target)
+            stepper_right_speed = target;
+
+        if (stepper_right_speed < STEP_RATE_MIN)
+        {
+            stepper_right_stop();
+            return;
+        }
+    }
+
+    if (!stepper_right_enabled && !stepper_right_enable_wait)
+    {
+        stepper_right_set_dir_pin(stepper_right_dir);
+        stepper_right_enable(1);
+        stepper_right_enable_wait = 1U;
+        stepper_right_enable_tick = now;
+        step_rate_out_right = 0.0f;
+        return;
+    }
+
+    step_timer_set_rate(&htim15, TIM_CHANNEL_2, stepper_right_speed);
+    step_rate_out_right = stepper_right_dir ? stepper_right_speed : -stepper_right_speed;
 }
 
 /* ---- Hall-sensor EXTI ISR ---- */
@@ -487,6 +724,18 @@ int main(void)
     HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_2);
     __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
     stepper_right_enable(0);
+
+    stepper_left_enabled = 0U;
+    stepper_left_enable_wait = 0U;
+    stepper_left_dir = 1U;
+    stepper_left_dir_chg = 0U;
+    stepper_left_speed = 0.0f;
+
+    stepper_right_enabled = 0U;
+    stepper_right_enable_wait = 0U;
+    stepper_right_dir = 1U;
+    stepper_right_dir_chg = 0U;
+    stepper_right_speed = 0.0f;
 
     HAL_I2C_Mem_Read (&hi2c3, 0xA6, 0x00, I2C_MEMADD_SIZE_8BIT, &adxl1_id,       1, HAL_MAX_DELAY);
     HAL_I2C_Mem_Write(&hi2c3, 0xA6, 0x2D, I2C_MEMADD_SIZE_8BIT, &adxl_power_ctl, 1, HAL_MAX_DELAY);
@@ -575,12 +824,18 @@ int main(void)
             {
                 steering_error_deg = 0.0f;
                 steer_pid.integral *= 0.90f;
-                stepper_stop();
-                stepper_right_stop();
+
+                /* Smooth ramp-down instead of hard stop */
+                steering_apply_output(0.0f);
+                steering_apply_output_right(0.0f);
             }
             else
             {
                 step_rate_cmd = pid_update(&steer_pid, steering_error_deg, dt);
+
+                if (fabsf(step_rate_cmd) < STEER_OUTPUT_FLOOR)
+                    step_rate_cmd = 0.0f;
+
                 steering_apply_output(step_rate_cmd);
                 steering_apply_output_right(step_rate_cmd);
             }
