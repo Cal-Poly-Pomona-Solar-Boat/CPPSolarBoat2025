@@ -153,16 +153,16 @@ static uint32_t last_tick_motor_rpmRight       = 0;
 #define RUDDER_DEG_MIN              -35.0f
 #define WHEEL_DEG_RANGE              35.0f
 
-#define STEER_DEADBAND_DEG           2.0f
+#define STEER_DEADBAND_DEG           1.0f
 #define STEER_INT_ZONE_DEG           5.0f
-#define STEER_KP                     850.0f
+#define STEER_KP                     1000.0f
 #define STEER_KI                     5.0f
 #define STEER_KD                     4.0f
-#define STEER_OUTPUT_FLOOR           600.0f
+#define STEER_OUTPUT_FLOOR           0.0f
 
-#define AS5600_LPF_ALPHA             0.35f
-#define STEER_CMD_HYST_DEG           0.3f
-#define STEER_FB_HYST_DEG            0.2f
+#define AS5600_LPF_ALPHA             0.60f
+#define STEER_CMD_HYST_DEG           0.05f
+#define STEER_FB_HYST_DEG            0.05f
 
 typedef struct
 {
@@ -942,8 +942,7 @@ int main(void)
                 {
                     step_rate_cmd = pid_update(&steer_pid, steering_error_deg, dt);
 
-                    if (fabsf(step_rate_cmd) < STEER_OUTPUT_FLOOR)
-                        step_rate_cmd = 0.0f;
+                    /* output floor disabled for debug */
 
                     steering_apply_output(step_rate_cmd);
                     steering_apply_output_right(step_rate_cmd);
@@ -952,12 +951,12 @@ int main(void)
                 static uint32_t last_print = 0;
                 if (now - last_print >= 100U)
                 {
-                    printf("STR_RAW=%.2f STR=%.2f CMD=%.2f FB=%.2f ERR=%.2f RATE_L=%.1f RATE_R=%.1f\r\n",
-                           steering_deg_raw,
+                    printf("STR=%.2f CMD=%.2f FB=%.2f ERR=%.2f STEP=%.2f RATE_L=%.1f RATE_R=%.1f\r\n",
                            steering_deg,
                            steering_cmd_deg,
                            steering_fb_deg,
                            steering_error_deg,
+                           step_rate_cmd,
                            step_rate_out_left,
                            step_rate_out_right);
                     last_print = now;
