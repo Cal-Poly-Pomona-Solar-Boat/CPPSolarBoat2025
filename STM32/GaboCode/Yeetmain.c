@@ -5,33 +5,6 @@
 * @file           : main.c
 * @brief          : Sensor Hub + Closed-Loop Steering + FDCAN Transmit
 *                   STM32G474RE
-*
-* Sensors:
-*   - AS5600 #1 : magnetic steering angle (I2C3, addr 0x36)  <- steering wheel command
-*   - AS5600 #2 : magnetic steering angle (I2C4, addr 0x36)  <- rudder left  feedback
-*   - AS5600 #3 : magnetic steering angle (I2C2, addr 0x36)  <- rudder right feedback
-*   - ADXL345 #1 : motor 1 vibration      (I2C3, addr 0x53 / 0xA6)
-*   - ADXL345 #2 : motor 2 vibration      (I2C3, addr 0x1D / 0x3A)
-*   - Hall sensor #1 : motor RPM          (PA0, EXTI0)
-*   - Hall sensor #2 : motor RPM          (PA1, EXTI1)
-*   - Throttle : 0-5V mapping             (PC0, ADC1)
-*
-* Stepper outputs:
-*   Left  DM860I : TIM8  CH1 (PB6)  PUL | PB4 DIR | PB5 ENA
-*   Right DM860I : TIM15 CH2 (PB3)  PUL | PB10 DIR | PC3 ENA
-*
-* Motor-control notes:
-*   - Direct step-rate command in pulses/sec
-*   - STEP_RATE_MAX = 60000.0f
-*   - Asymmetric ramp up / ramp down
-*   - Larger neutral deadzone tuning
-*   - AS5600 filtered + hysteresis-conditioned
-*   - Non-blocking enable settle and direction-change settle
-*   - 50% duty pulse output
-*   - Immediate timer update using EGR=UG
-*   - TIM8/TIM15 prescaler = 169 -> 1 MHz timer clock
-*   - AS5600 STATUS register is checked before using angle
-*   - Zero references are captured only after valid/stable magnet detection
 ******************************************************************************
 */
 /* USER CODE END Header */
@@ -88,7 +61,7 @@ static uint8_t steering_fb_zero_valid  = 0U;
 /* Optional stability counters before zero capture */
 static uint8_t steering_cmd_valid_count = 0U;
 static uint8_t steering_fb_valid_count  = 0U;
-#define AS5600_ZERO_STABLE_SAMPLES      10U   /* 10 x 2ms = 20ms stable before zero capture */
+#define AS5600_ZERO_STABLE_SAMPLES      10U
 
 /* --- Throttle 0-5V (ADC1) --- */
 uint16_t throttle_raw = 0;
@@ -165,11 +138,9 @@ static uint32_t last_tick_motor_rpmRight       = 0;
  * CLOSED-LOOP STEERING CONTROL
  * ================================================================ */
 
-/* TIM8/TIM15 effective timer clock after PSC=169 */
 #define STEP_TIM_PSC                 169U
-#define STEP_TIM_CLK_HZ              (170000000.0f / (STEP_TIM_PSC + 1.0f))   /* 1 MHz */
+#define STEP_TIM_CLK_HZ              (170000000.0f / (STEP_TIM_PSC + 1.0f))
 
-/* Motor rate / ramp tuning */
 #define STEP_RATE_MAX                60000.0f
 #define STEP_RATE_MIN                200.0f
 #define RAMP_UP_SLEW                 800.0f
@@ -178,23 +149,20 @@ static uint32_t last_tick_motor_rpmRight       = 0;
 #define DIR_CHANGE_SETTLE_MS         2U
 #define STEPPER_ENABLE_SETTLE_MS     5U
 
-/* Steering geometry */
 #define RUDDER_DEG_MAX               35.0f
 #define RUDDER_DEG_MIN              -35.0f
 #define WHEEL_DEG_RANGE              35.0f
 
-/* PID / control shaping */
-#define STEER_DEADBAND_DEG           4.0f
+#define STEER_DEADBAND_DEG           2.0f
 #define STEER_INT_ZONE_DEG           5.0f
-#define STEER_KP                     700.0f
+#define STEER_KP                     850.0f
 #define STEER_KI                     5.0f
 #define STEER_KD                     4.0f
-#define STEER_OUTPUT_FLOOR           1500.0f
+#define STEER_OUTPUT_FLOOR           600.0f
 
-/* AS5600 filtering / anti-jitter */
-#define AS5600_LPF_ALPHA             0.20f   /* new contribution each 2 ms */
-#define STEER_CMD_HYST_DEG           1.0f    /* ignore tiny command wobble */
-#define STEER_FB_HYST_DEG            0.5f    /* ignore tiny feedback wobble */
+#define AS5600_LPF_ALPHA             0.35f
+#define STEER_CMD_HYST_DEG           0.3f
+#define STEER_FB_HYST_DEG            0.2f
 
 typedef struct
 {
@@ -234,10 +202,10 @@ static float step_rate_out_right     = 0.0f;
 
 /* Left motor state */
 static uint8_t  stepper_left_enabled      = 0U;
-static uint8_t  stepper_left_dir          = 1U;   /* 1=positive, 0=negative */
+static uint8_t  stepper_left_dir          = 1U;
 static uint8_t  stepper_left_dir_chg      = 0U;
 static uint8_t  stepper_left_enable_wait  = 0U;
-static float    stepper_left_speed        = 0.0f; /* magnitude only */
+static float    stepper_left_speed        = 0.0f;
 static uint32_t stepper_left_dir_tick     = 0U;
 static uint32_t stepper_left_enable_tick  = 0U;
 
@@ -267,7 +235,6 @@ static void MX_TIM15_Init(void);
 
 /* USER CODE BEGIN 0 */
 
-/* ---- Math helpers ---- */
 static float clampf(float x, float lo, float hi)
 {
     if (x < lo) return lo;
@@ -328,7 +295,6 @@ static float pid_update(PID_t *pid, float error, float dt)
     }
 }
 
-/* ---- ADC helper ---- */
 static uint16_t read_adc(void)
 {
     HAL_ADC_Start(&hadc1);
@@ -340,7 +306,6 @@ static uint16_t read_adc(void)
     }
 }
 
-/* ---- AS5600 STATUS helper ---- */
 static uint8_t as5600_magnet_ok(I2C_HandleTypeDef *hi2c)
 {
     const uint8_t addr = (0x36 << 1);
@@ -360,7 +325,6 @@ static uint8_t as5600_magnet_ok(I2C_HandleTypeDef *hi2c)
     }
 }
 
-/* ---- AS5600 angle helper ---- */
 static float as5600_read_deg(I2C_HandleTypeDef *hi2c, uint8_t *buf)
 {
     const uint8_t addr = (0x36 << 1);
@@ -377,7 +341,6 @@ static float as5600_read_deg(I2C_HandleTypeDef *hi2c, uint8_t *buf)
     }
 }
 
-/* ---- Shared timer pulse writer ---- */
 static void step_timer_set_rate(TIM_HandleTypeDef *htim, uint32_t channel, float rate_pps)
 {
     if (rate_pps < STEP_RATE_MIN)
@@ -400,9 +363,6 @@ static void step_timer_set_rate(TIM_HandleTypeDef *htim, uint32_t channel, float
     }
 }
 
-/* ================================================================
- * Left stepper
- * ================================================================ */
 static void stepper_enable(uint8_t enable)
 {
     HAL_GPIO_WritePin(GPIOB, EN_L_Pin, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
@@ -547,9 +507,6 @@ static void steering_apply_output(float cmd_hz)
     step_rate_out_left = stepper_left_dir ? stepper_left_speed : -stepper_left_speed;
 }
 
-/* ================================================================
- * Right stepper
- * ================================================================ */
 static void stepper_right_enable(uint8_t enable)
 {
     HAL_GPIO_WritePin(GPIOC, EN_R_Pin, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);
@@ -694,7 +651,6 @@ static void steering_apply_output_right(float cmd_hz)
     step_rate_out_right = stepper_right_dir ? stepper_right_speed : -stepper_right_speed;
 }
 
-/* ---- Hall-sensor EXTI ISR ---- */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     uint32_t time_diff;
@@ -771,8 +727,6 @@ int main(void)
     MX_DAC1_Init();
     MX_TIM15_Init();
 
-    /* USER CODE BEGIN 2 */
-
     HAL_TIM_Base_Start(&htim2);
 
     HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
@@ -822,13 +776,10 @@ int main(void)
     BspCOMInit.HwFlowCtl  = COM_HWCONTROL_NONE;
     if (BSP_COM_Init(COM1, &BspCOMInit) != BSP_ERROR_NONE) Error_Handler();
 
-    /* USER CODE END 2 */
-
     while (1)
     {
         uint32_t now = HAL_GetTick();
 
-        /* --- Read all AS5600 sensors @ 500 Hz --- */
         if (now - last_tick_steering >= RATE_STEERING_MS)
         {
             float v;
@@ -855,7 +806,6 @@ int main(void)
                 if (v >= 0.0f) fb_right_deg_raw = v;
             }
 
-            /* Initialize or update filters only with valid sensors */
             if (!as5600_filter_init)
             {
                 if (steering_mag_ok && fb_left_mag_ok && fb_right_mag_ok)
@@ -878,7 +828,6 @@ int main(void)
                     fb_right_deg = lpf_angle_deg(fb_right_deg, fb_right_deg_raw, AS5600_LPF_ALPHA);
             }
 
-            /* Stable delayed zero capture */
             if (!steering_cmd_zero_valid)
             {
                 if (steering_mag_ok && as5600_filter_init)
@@ -918,7 +867,6 @@ int main(void)
             last_tick_steering = now;
         }
 
-        /* --- Closed-loop steering control @ 500 Hz --- */
         if (now - last_tick_steering_ctrl >= RATE_STEERING_CTRL_MS)
         {
             const float dt = RATE_STEERING_CTRL_MS / 1000.0f;
@@ -1019,16 +967,13 @@ int main(void)
             }
         }
 
-        /* --- Throttle @ 50 Hz --- */
         if (now - last_tick_throttle >= RATE_THROTTLE_MS)
         {
             throttle_raw = read_adc();
             throttle_out = (throttle_raw * 3.3f) / 4096.0f;
-            /* can_tx_throttle(throttle_out); */
             last_tick_throttle = now;
         }
 
-        /* --- ADXL345 #1 @ 100 Hz --- */
         if (now - last_tick_motor_vibrationLeft >= ADXL_SAMPLE_INTERVAL_MS)
         {
             HAL_I2C_Mem_Read(&hi2c3, 0xA6, 0x32, I2C_MEMADD_SIZE_8BIT,
@@ -1068,7 +1013,6 @@ int main(void)
                     (sqrtf(sum_z1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
 
                 (void)motor_vibrationLeft_unsafe;
-                /* can_tx_adxl1(motor_vibrationLeft_unsafe); */
 
                 adxl1_index = 0;
                 sum_x1 = 0.0f; sum_y1 = 0.0f; sum_z1 = 0.0f;
@@ -1077,7 +1021,6 @@ int main(void)
             last_tick_motor_vibrationLeft = now;
         }
 
-        /* --- ADXL345 #2 @ 100 Hz --- */
         if (now - last_tick_motor_vibrationRight >= ADXL_SAMPLE_INTERVAL_MS)
         {
             HAL_I2C_Mem_Read(&hi2c3, 0x3A, 0x32, I2C_MEMADD_SIZE_8BIT,
@@ -1117,7 +1060,6 @@ int main(void)
                     (sqrtf(sum_z2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
 
                 (void)motor_vibrationRight_unsafe;
-                /* can_tx_adxl2(motor_vibrationRight_unsafe); */
 
                 adxl2_index = 0;
                 sum_x2 = 0.0f; sum_y2 = 0.0f; sum_z2 = 0.0f;
@@ -1126,7 +1068,6 @@ int main(void)
             last_tick_motor_vibrationRight = now;
         }
 
-        /* --- Hall #1 @ 1000 Hz --- */
         if (now - last_tick_motor_rpmLeft >= RATE_MOTOR_RPM_MS)
         {
             uint32_t time_since;
@@ -1139,11 +1080,9 @@ int main(void)
                 rpm_1     = 0.0f;
                 rpm_1_avg = 0.0f;
             }
-            /* can_tx_rpm(rpm_1_avg); */
             last_tick_motor_rpmLeft = now;
         }
 
-        /* --- Hall #2 @ 1000 Hz --- */
         if (now - last_tick_motor_rpmRight >= RATE_MOTOR_RPM_MS)
         {
             uint32_t time_since;
@@ -1156,16 +1095,11 @@ int main(void)
                 rpm_2     = 0.0f;
                 rpm_2_avg = 0.0f;
             }
-            /* can_tx_rpm2(rpm_2_avg); */
             last_tick_motor_rpmRight = now;
         }
     }
 }
 
-/* ================================================================
- * System Clock Configuration
- * HSE -> PLL -> 170 MHz SYSCLK
- * ================================================================ */
 void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
