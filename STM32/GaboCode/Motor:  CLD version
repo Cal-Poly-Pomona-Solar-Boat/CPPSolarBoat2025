@@ -223,7 +223,7 @@ static uint32_t last_tick_motor_rpmRight        = 0;
  *                         During this window pulses are suppressed so the
  *                         driver sees a clean DIR edge before the next step.
  * ---------------------------------------------------------------- */
-#define STEP_RATE_MAX            60000.0f
+#define STEP_RATE_MAX            68000.0f
 #define STEP_RATE_MIN            200.0f
 #define RAMP_UP_SLEW             800.0f    /* Hz per 2 ms tick */
 #define RAMP_DOWN_SLEW           2000.0f   /* Hz per 2 ms tick */
