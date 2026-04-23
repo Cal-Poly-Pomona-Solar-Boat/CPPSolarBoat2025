@@ -24,22 +24,14 @@
 *   - Direct step-rate command in pulses/sec
 *   - STEP_RATE_MAX = 60000.0f
 *   - Asymmetric ramp up / ramp down
-*   - Faster smooth stop tuning
+*   - Larger neutral deadzone tuning
+*   - AS5600 filtered + hysteresis-conditioned
 *   - Non-blocking enable settle and direction-change settle
 *   - 50% duty pulse output
 *   - Immediate timer update using EGR=UG
 *   - TIM8/TIM15 prescaler = 169 -> 1 MHz timer clock
-*   - AS5600 read uses one 2-byte transaction and masks to 12 bits
 *   - AS5600 STATUS register is checked before using angle
 *   - Zero references are captured only after valid/stable magnet detection
-*
-* Gearbox / pulse math:
-*   - Motor microstep setting assumed: 1600 pulses/rev
-*   - Gearbox ratio: 20:1
-*   - Output deg/pulse = 360 / (1600 * 20) = 0.01125 deg
-*   - STEP_RATE_MAX = 60000 pulse/s
-*   - Motor speed max = 60000 / 1600 * 60 = 2250 RPM
-*   - Output speed max = 2250 / 20 = 112.5 RPM
 ******************************************************************************
 */
 /* USER CODE END Header */
@@ -68,15 +60,21 @@ TIM_HandleTypeDef htim15;
 
 /* USER CODE BEGIN PV */
 
-/* --- AS5600 sensors --- */
+/* --- AS5600 raw sensors --- */
 static uint8_t steering_data[2];
-static float   steering_deg = 0.0f;
+static float   steering_deg_raw = 0.0f;
 
 static uint8_t fb_left_data[2];
-static float   fb_left_deg  = 0.0f;
+static float   fb_left_deg_raw  = 0.0f;
 
 static uint8_t fb_right_data[2];
-static float   fb_right_deg = 0.0f;
+static float   fb_right_deg_raw = 0.0f;
+
+/* --- AS5600 filtered sensors actually used by control --- */
+static float steering_deg = 0.0f;
+static float fb_left_deg  = 0.0f;
+static float fb_right_deg = 0.0f;
+static uint8_t as5600_filter_init = 0U;
 
 /* AS5600 validity flags */
 static uint8_t steering_mag_ok = 0U;
@@ -174,8 +172,8 @@ static uint32_t last_tick_motor_rpmRight       = 0;
 /* Motor rate / ramp tuning */
 #define STEP_RATE_MAX                60000.0f
 #define STEP_RATE_MIN                200.0f
-#define RAMP_UP_SLEW                 800.0f      /* pulse/s added per 2 ms tick */
-#define RAMP_DOWN_SLEW               6000.0f     /* faster smooth stop */
+#define RAMP_UP_SLEW                 800.0f
+#define RAMP_DOWN_SLEW               6000.0f
 #define DIR_CHANGE_RAMP_HZ           2000.0f
 #define DIR_CHANGE_SETTLE_MS         2U
 #define STEPPER_ENABLE_SETTLE_MS     5U
@@ -186,12 +184,17 @@ static uint32_t last_tick_motor_rpmRight       = 0;
 #define WHEEL_DEG_RANGE              35.0f
 
 /* PID / control shaping */
-#define STEER_DEADBAND_DEG           2.0f
+#define STEER_DEADBAND_DEG           4.0f
 #define STEER_INT_ZONE_DEG           5.0f
-#define STEER_KP                     1000.0f
-#define STEER_KI                     10.0f
-#define STEER_KD                     5.0f
-#define STEER_OUTPUT_FLOOR           800.0f
+#define STEER_KP                     700.0f
+#define STEER_KI                     5.0f
+#define STEER_KD                     4.0f
+#define STEER_OUTPUT_FLOOR           1500.0f
+
+/* AS5600 filtering / anti-jitter */
+#define AS5600_LPF_ALPHA             0.20f   /* new contribution each 2 ms */
+#define STEER_CMD_HYST_DEG           1.0f    /* ignore tiny command wobble */
+#define STEER_FB_HYST_DEG            0.5f    /* ignore tiny feedback wobble */
 
 typedef struct
 {
@@ -220,12 +223,14 @@ static float steering_cmd_ref_deg = -1.0f;
 static float steering_fb_ref_deg  = -1.0f;
 
 /* Working variables */
-static float steering_cmd_deg    = 0.0f;
-static float steering_fb_deg     = 0.0f;
-static float steering_error_deg  = 0.0f;
-static float step_rate_cmd       = 0.0f;
-static float step_rate_out_left  = 0.0f;
-static float step_rate_out_right = 0.0f;
+static float steering_cmd_deg        = 0.0f;
+static float steering_cmd_deg_hold   = 0.0f;
+static float steering_fb_deg         = 0.0f;
+static float steering_fb_deg_hold    = 0.0f;
+static float steering_error_deg      = 0.0f;
+static float step_rate_cmd           = 0.0f;
+static float step_rate_out_left      = 0.0f;
+static float step_rate_out_right     = 0.0f;
 
 /* Left motor state */
 static uint8_t  stepper_left_enabled      = 0U;
@@ -294,6 +299,12 @@ static float circular_mean_deg(float a_deg, float b_deg)
     return angle_wrap_360(atan2f(y, x) * 180.0f / (float)M_PI);
 }
 
+static float lpf_angle_deg(float prev_deg, float new_deg, float alpha)
+{
+    float err = angle_error_deg_fn(new_deg, prev_deg);
+    return angle_wrap_360(prev_deg + alpha * err);
+}
+
 static float pid_update(PID_t *pid, float error, float dt)
 {
     if ((error > 0.0f && pid->prev_error < 0.0f) ||
@@ -308,11 +319,13 @@ static float pid_update(PID_t *pid, float error, float dt)
         pid->integral  = clampf(pid->integral, pid->int_min, pid->int_max);
     }
 
-    float derivative = (error - pid->prev_error) / dt;
-    float output     = (pid->kp * error) + pid->integral + (pid->kd * derivative);
-    output = clampf(output, pid->out_min, pid->out_max);
-    pid->prev_error = error;
-    return output;
+    {
+        float derivative = (error - pid->prev_error) / dt;
+        float output     = (pid->kp * error) + pid->integral + (pid->kd * derivative);
+        output = clampf(output, pid->out_min, pid->out_max);
+        pid->prev_error = error;
+        return output;
+    }
 }
 
 /* ---- ADC helper ---- */
@@ -320,18 +333,14 @@ static uint16_t read_adc(void)
 {
     HAL_ADC_Start(&hadc1);
     HAL_ADC_PollForConversion(&hadc1, 10);
-    uint16_t v = (uint16_t)HAL_ADC_GetValue(&hadc1);
-    HAL_ADC_Stop(&hadc1);
-    return v;
+    {
+        uint16_t v = (uint16_t)HAL_ADC_GetValue(&hadc1);
+        HAL_ADC_Stop(&hadc1);
+        return v;
+    }
 }
 
-/* ---- AS5600 STATUS helper ----
- * STATUS register 0x0B:
- *   MD bit 5 = magnet detected
- *   ML bit 4 = magnet too weak
- *   MH bit 3 = magnet too strong
- * Good condition: MD=1 and ML=0 and MH=0
- */
+/* ---- AS5600 STATUS helper ---- */
 static uint8_t as5600_magnet_ok(I2C_HandleTypeDef *hi2c)
 {
     const uint8_t addr = (0x36 << 1);
@@ -351,7 +360,7 @@ static uint8_t as5600_magnet_ok(I2C_HandleTypeDef *hi2c)
     }
 }
 
-/* ---- Better AS5600 helper ---- */
+/* ---- AS5600 angle helper ---- */
 static float as5600_read_deg(I2C_HandleTypeDef *hi2c, uint8_t *buf)
 {
     const uint8_t addr = (0x36 << 1);
@@ -385,14 +394,14 @@ static void step_timer_set_rate(TIM_HandleTypeDef *htim, uint32_t channel, float
         if (arr > 65535U) arr = 65535U;
 
         __HAL_TIM_SET_AUTORELOAD(htim, arr);
-        __HAL_TIM_SET_COMPARE(htim, channel, arr / 2U);  /* 50% duty */
+        __HAL_TIM_SET_COMPARE(htim, channel, arr / 2U);
         __HAL_TIM_SET_COUNTER(htim, 0);
         htim->Instance->EGR = TIM_EGR_UG;
     }
 }
 
 /* ================================================================
- * Left stepper (TIM8 CH1 / PB6 PUL / PB4 DIR / PB5 ENA)
+ * Left stepper
  * ================================================================ */
 static void stepper_enable(uint8_t enable)
 {
@@ -425,7 +434,6 @@ static void steering_apply_output(float cmd_hz)
 
     if (target > STEP_RATE_MAX) target = STEP_RATE_MAX;
 
-    /* Enable settle gate */
     if (stepper_left_enable_wait)
     {
         if ((now - stepper_left_enable_tick) < STEPPER_ENABLE_SETTLE_MS)
@@ -441,7 +449,6 @@ static void steering_apply_output(float cmd_hz)
             stepper_left_speed = STEP_RATE_MIN;
     }
 
-    /* Direction-change settle gate */
     if (stepper_left_dir_chg)
     {
         if ((now - stepper_left_dir_tick) < DIR_CHANGE_SETTLE_MS)
@@ -455,7 +462,6 @@ static void steering_apply_output(float cmd_hz)
         stepper_left_speed   = STEP_RATE_MIN;
     }
 
-    /* Direction reversal handling */
     if ((target >= STEP_RATE_MIN) && (want_dir != stepper_left_dir))
     {
         if (stepper_left_speed > DIR_CHANGE_RAMP_HZ)
@@ -491,7 +497,6 @@ static void steering_apply_output(float cmd_hz)
         return;
     }
 
-    /* Normal ramp up / down */
     if (target < STEP_RATE_MIN)
     {
         if (stepper_left_speed > 0.0f)
@@ -543,7 +548,7 @@ static void steering_apply_output(float cmd_hz)
 }
 
 /* ================================================================
- * Right stepper (TIM15 CH2 / PB3 PUL / PB10 DIR / PC3 ENA)
+ * Right stepper
  * ================================================================ */
 static void stepper_right_enable(uint8_t enable)
 {
@@ -703,17 +708,16 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
         if (time_diff > 5000U)
         {
+            int i;
+            float sum = 0.0f;
+
             rpm_1 = (60.0f * TICKS_PER_SECOND) /
                     ((float)time_diff * (float)PULSES_PER_REVOLUTION);
             rpm_1_buffer[rpm_1_buffer_index] = rpm_1;
             rpm_1_buffer_index = (rpm_1_buffer_index + 1) % AVG_SAMPLES;
 
-            {
-                float sum = 0.0f;
-                int i;
-                for (i = 0; i < AVG_SAMPLES; i++) sum += rpm_1_buffer[i];
-                rpm_1_avg = sum / (float)AVG_SAMPLES;
-            }
+            for (i = 0; i < AVG_SAMPLES; i++) sum += rpm_1_buffer[i];
+            rpm_1_avg = sum / (float)AVG_SAMPLES;
 
             last_time_1     = current_time;
             pulse_1_count++;
@@ -728,17 +732,16 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
         if (time_diff > 5000U)
         {
+            int i;
+            float sum = 0.0f;
+
             rpm_2 = (60.0f * TICKS_PER_SECOND) /
                     ((float)time_diff * (float)PULSES_PER_REVOLUTION);
             rpm_2_buffer[rpm_2_buffer_index] = rpm_2;
             rpm_2_buffer_index = (rpm_2_buffer_index + 1) % AVG_SAMPLES;
 
-            {
-                float sum = 0.0f;
-                int i;
-                for (i = 0; i < AVG_SAMPLES; i++) sum += rpm_2_buffer[i];
-                rpm_2_avg = sum / (float)AVG_SAMPLES;
-            }
+            for (i = 0; i < AVG_SAMPLES; i++) sum += rpm_2_buffer[i];
+            rpm_2_avg = sum / (float)AVG_SAMPLES;
 
             last_time_2     = current_time;
             pulse_2_count++;
@@ -837,31 +840,55 @@ int main(void)
             if (steering_mag_ok)
             {
                 v = as5600_read_deg(&hi2c3, steering_data);
-                if (v >= 0.0f) steering_deg = v;
+                if (v >= 0.0f) steering_deg_raw = v;
             }
 
             if (fb_left_mag_ok)
             {
                 v = as5600_read_deg(&hi2c4, fb_left_data);
-                if (v >= 0.0f) fb_left_deg = v;
+                if (v >= 0.0f) fb_left_deg_raw = v;
             }
 
             if (fb_right_mag_ok)
             {
                 v = as5600_read_deg(&hi2c2, fb_right_data);
-                if (v >= 0.0f) fb_right_deg = v;
+                if (v >= 0.0f) fb_right_deg_raw = v;
+            }
+
+            /* Initialize or update filters only with valid sensors */
+            if (!as5600_filter_init)
+            {
+                if (steering_mag_ok && fb_left_mag_ok && fb_right_mag_ok)
+                {
+                    steering_deg = steering_deg_raw;
+                    fb_left_deg  = fb_left_deg_raw;
+                    fb_right_deg = fb_right_deg_raw;
+                    as5600_filter_init = 1U;
+                }
+            }
+            else
+            {
+                if (steering_mag_ok)
+                    steering_deg = lpf_angle_deg(steering_deg, steering_deg_raw, AS5600_LPF_ALPHA);
+
+                if (fb_left_mag_ok)
+                    fb_left_deg = lpf_angle_deg(fb_left_deg, fb_left_deg_raw, AS5600_LPF_ALPHA);
+
+                if (fb_right_mag_ok)
+                    fb_right_deg = lpf_angle_deg(fb_right_deg, fb_right_deg_raw, AS5600_LPF_ALPHA);
             }
 
             /* Stable delayed zero capture */
             if (!steering_cmd_zero_valid)
             {
-                if (steering_mag_ok)
+                if (steering_mag_ok && as5600_filter_init)
                 {
                     if (steering_cmd_valid_count < 255U) steering_cmd_valid_count++;
                     if (steering_cmd_valid_count >= AS5600_ZERO_STABLE_SAMPLES)
                     {
                         steering_cmd_ref_deg = angle_wrap_360(steering_deg);
                         steering_cmd_zero_valid = 1U;
+                        steering_cmd_deg_hold = 0.0f;
                     }
                 }
                 else
@@ -872,13 +899,14 @@ int main(void)
 
             if (!steering_fb_zero_valid)
             {
-                if (fb_left_mag_ok && fb_right_mag_ok)
+                if (fb_left_mag_ok && fb_right_mag_ok && as5600_filter_init)
                 {
                     if (steering_fb_valid_count < 255U) steering_fb_valid_count++;
                     if (steering_fb_valid_count >= AS5600_ZERO_STABLE_SAMPLES)
                     {
                         steering_fb_ref_deg = circular_mean_deg(fb_left_deg, fb_right_deg);
                         steering_fb_zero_valid = 1U;
+                        steering_fb_deg_hold = 0.0f;
                     }
                 }
                 else
@@ -895,9 +923,9 @@ int main(void)
         {
             const float dt = RATE_STEERING_CTRL_MS / 1000.0f;
 
-            /* Inhibit control until all sensors are valid and zeros captured */
             if (!(steering_mag_ok && fb_left_mag_ok && fb_right_mag_ok &&
-                  steering_cmd_zero_valid && steering_fb_zero_valid))
+                  steering_cmd_zero_valid && steering_fb_zero_valid &&
+                  as5600_filter_init))
             {
                 stepper_stop();
                 stepper_right_stop();
@@ -923,23 +951,35 @@ int main(void)
             else
             {
                 float wheel_delta;
+                float cmd_candidate;
                 float raw_fb;
+                float fb_candidate;
 
                 wheel_delta = angle_error_deg_fn(
                                   angle_wrap_360(steering_deg),
                                   steering_cmd_ref_deg);
 
-                steering_cmd_deg = clampf(
+                cmd_candidate = clampf(
                     (wheel_delta / WHEEL_DEG_RANGE) * RUDDER_DEG_MAX,
                     RUDDER_DEG_MIN,
                     RUDDER_DEG_MAX);
 
+                if (fabsf(cmd_candidate - steering_cmd_deg_hold) >= STEER_CMD_HYST_DEG)
+                    steering_cmd_deg_hold = cmd_candidate;
+
+                steering_cmd_deg = steering_cmd_deg_hold;
+
                 raw_fb = circular_mean_deg(fb_left_deg, fb_right_deg);
 
-                steering_fb_deg = clampf(
+                fb_candidate = clampf(
                     angle_error_deg_fn(raw_fb, steering_fb_ref_deg),
                     RUDDER_DEG_MIN,
                     RUDDER_DEG_MAX);
+
+                if (fabsf(fb_candidate - steering_fb_deg_hold) >= STEER_FB_HYST_DEG)
+                    steering_fb_deg_hold = fb_candidate;
+
+                steering_fb_deg = steering_fb_deg_hold;
 
                 steering_error_deg = steering_cmd_deg - steering_fb_deg;
 
@@ -947,8 +987,6 @@ int main(void)
                 {
                     steering_error_deg = 0.0f;
                     steer_pid.integral *= 0.90f;
-
-                    /* Smooth ramp-down instead of hard stop */
                     steering_apply_output(0.0f);
                     steering_apply_output_right(0.0f);
                 }
@@ -966,15 +1004,14 @@ int main(void)
                 static uint32_t last_print = 0;
                 if (now - last_print >= 100U)
                 {
-                    printf("CMD=%.2f FB=%.2f ERR=%.2f RATE_L=%.1f RATE_R=%.1f MAG=%u%u%u\r\n",
+                    printf("STR_RAW=%.2f STR=%.2f CMD=%.2f FB=%.2f ERR=%.2f RATE_L=%.1f RATE_R=%.1f\r\n",
+                           steering_deg_raw,
+                           steering_deg,
                            steering_cmd_deg,
                            steering_fb_deg,
                            steering_error_deg,
                            step_rate_out_left,
-                           step_rate_out_right,
-                           steering_mag_ok,
-                           fb_left_mag_ok,
-                           fb_right_mag_ok);
+                           step_rate_out_right);
                     last_print = now;
                 }
 
