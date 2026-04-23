@@ -30,6 +30,8 @@
 *   - Immediate timer update using EGR=UG
 *   - TIM8/TIM15 prescaler = 169 -> 1 MHz timer clock
 *   - AS5600 read uses one 2-byte transaction and masks to 12 bits
+*   - AS5600 STATUS register is checked before using angle
+*   - Zero references are captured only after valid/stable magnet detection
 *
 * Gearbox / pulse math:
 *   - Motor microstep setting assumed: 1600 pulses/rev
@@ -75,6 +77,20 @@ static float   fb_left_deg  = 0.0f;
 
 static uint8_t fb_right_data[2];
 static float   fb_right_deg = 0.0f;
+
+/* AS5600 validity flags */
+static uint8_t steering_mag_ok = 0U;
+static uint8_t fb_left_mag_ok  = 0U;
+static uint8_t fb_right_mag_ok = 0U;
+
+/* Zero-capture valid flags */
+static uint8_t steering_cmd_zero_valid = 0U;
+static uint8_t steering_fb_zero_valid  = 0U;
+
+/* Optional stability counters before zero capture */
+static uint8_t steering_cmd_valid_count = 0U;
+static uint8_t steering_fb_valid_count  = 0U;
+#define AS5600_ZERO_STABLE_SAMPLES      10U   /* 10 x 2ms = 20ms stable before zero capture */
 
 /* --- Throttle 0-5V (ADC1) --- */
 uint16_t throttle_raw = 0;
@@ -309,6 +325,32 @@ static uint16_t read_adc(void)
     return v;
 }
 
+/* ---- AS5600 STATUS helper ----
+ * STATUS register 0x0B:
+ *   MD bit 5 = magnet detected
+ *   ML bit 4 = magnet too weak
+ *   MH bit 3 = magnet too strong
+ * Good condition: MD=1 and ML=0 and MH=0
+ */
+static uint8_t as5600_magnet_ok(I2C_HandleTypeDef *hi2c)
+{
+    const uint8_t addr = (0x36 << 1);
+    uint8_t status = 0;
+
+    if (HAL_I2C_Mem_Read(hi2c, addr, 0x0B, I2C_MEMADD_SIZE_8BIT,
+                         &status, 1, HAL_MAX_DELAY) != HAL_OK)
+    {
+        return 0U;
+    }
+
+    {
+        uint8_t md = (status & 0x20U) ? 1U : 0U;
+        uint8_t ml = (status & 0x10U) ? 1U : 0U;
+        uint8_t mh = (status & 0x08U) ? 1U : 0U;
+        return (md && !ml && !mh) ? 1U : 0U;
+    }
+}
+
 /* ---- Better AS5600 helper ---- */
 static float as5600_read_deg(I2C_HandleTypeDef *hi2c, uint8_t *buf)
 {
@@ -320,8 +362,10 @@ static float as5600_read_deg(I2C_HandleTypeDef *hi2c, uint8_t *buf)
         return -1.0f;
     }
 
-    uint16_t raw = (((uint16_t)buf[0] << 8) | buf[1]) & 0x0FFF;
-    return (raw * 360.0f) / 4096.0f;
+    {
+        uint16_t raw = (((uint16_t)buf[0] << 8) | buf[1]) & 0x0FFF;
+        return (raw * 360.0f) / 4096.0f;
+    }
 }
 
 /* ---- Shared timer pulse writer ---- */
@@ -334,15 +378,17 @@ static void step_timer_set_rate(TIM_HandleTypeDef *htim, uint32_t channel, float
         return;
     }
 
-    uint32_t arr = (uint32_t)((STEP_TIM_CLK_HZ / rate_pps) - 1.0f);
+    {
+        uint32_t arr = (uint32_t)((STEP_TIM_CLK_HZ / rate_pps) - 1.0f);
 
-    if (arr < 10U)    arr = 10U;
-    if (arr > 65535U) arr = 65535U;
+        if (arr < 10U)    arr = 10U;
+        if (arr > 65535U) arr = 65535U;
 
-    __HAL_TIM_SET_AUTORELOAD(htim, arr);
-    __HAL_TIM_SET_COMPARE(htim, channel, arr / 2U);  /* 50% duty */
-    __HAL_TIM_SET_COUNTER(htim, 0);
-    htim->Instance->EGR = TIM_EGR_UG;
+        __HAL_TIM_SET_AUTORELOAD(htim, arr);
+        __HAL_TIM_SET_COMPARE(htim, channel, arr / 2U);  /* 50% duty */
+        __HAL_TIM_SET_COUNTER(htim, 0);
+        htim->Instance->EGR = TIM_EGR_UG;
+    }
 }
 
 /* ================================================================
@@ -662,9 +708,13 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             rpm_1_buffer[rpm_1_buffer_index] = rpm_1;
             rpm_1_buffer_index = (rpm_1_buffer_index + 1) % AVG_SAMPLES;
 
-            float sum = 0.0f;
-            for (int i = 0; i < AVG_SAMPLES; i++) sum += rpm_1_buffer[i];
-            rpm_1_avg       = sum / (float)AVG_SAMPLES;
+            {
+                float sum = 0.0f;
+                int i;
+                for (i = 0; i < AVG_SAMPLES; i++) sum += rpm_1_buffer[i];
+                rpm_1_avg = sum / (float)AVG_SAMPLES;
+            }
+
             last_time_1     = current_time;
             pulse_1_count++;
             new_rpm_1_ready = 1;
@@ -683,9 +733,13 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             rpm_2_buffer[rpm_2_buffer_index] = rpm_2;
             rpm_2_buffer_index = (rpm_2_buffer_index + 1) % AVG_SAMPLES;
 
-            float sum = 0.0f;
-            for (int i = 0; i < AVG_SAMPLES; i++) sum += rpm_2_buffer[i];
-            rpm_2_avg       = sum / (float)AVG_SAMPLES;
+            {
+                float sum = 0.0f;
+                int i;
+                for (i = 0; i < AVG_SAMPLES; i++) sum += rpm_2_buffer[i];
+                rpm_2_avg = sum / (float)AVG_SAMPLES;
+            }
+
             last_time_2     = current_time;
             pulse_2_count++;
             new_rpm_2_ready = 1;
@@ -776,18 +830,62 @@ int main(void)
         {
             float v;
 
-            v = as5600_read_deg(&hi2c3, steering_data);
-            if (v >= 0.0f) steering_deg = v;
+            steering_mag_ok = as5600_magnet_ok(&hi2c3);
+            fb_left_mag_ok  = as5600_magnet_ok(&hi2c4);
+            fb_right_mag_ok = as5600_magnet_ok(&hi2c2);
 
-            v = as5600_read_deg(&hi2c4, fb_left_data);
-            if (v >= 0.0f) fb_left_deg = v;
+            if (steering_mag_ok)
+            {
+                v = as5600_read_deg(&hi2c3, steering_data);
+                if (v >= 0.0f) steering_deg = v;
+            }
 
-            v = as5600_read_deg(&hi2c2, fb_right_data);
-            if (v >= 0.0f) fb_right_deg = v;
+            if (fb_left_mag_ok)
+            {
+                v = as5600_read_deg(&hi2c4, fb_left_data);
+                if (v >= 0.0f) fb_left_deg = v;
+            }
 
-            /* can_tx_steering1(steering_deg); */
-            /* can_tx_steering2(fb_left_deg); */
-            /* can_tx_steering3(fb_right_deg); */
+            if (fb_right_mag_ok)
+            {
+                v = as5600_read_deg(&hi2c2, fb_right_data);
+                if (v >= 0.0f) fb_right_deg = v;
+            }
+
+            /* Stable delayed zero capture */
+            if (!steering_cmd_zero_valid)
+            {
+                if (steering_mag_ok)
+                {
+                    if (steering_cmd_valid_count < 255U) steering_cmd_valid_count++;
+                    if (steering_cmd_valid_count >= AS5600_ZERO_STABLE_SAMPLES)
+                    {
+                        steering_cmd_ref_deg = angle_wrap_360(steering_deg);
+                        steering_cmd_zero_valid = 1U;
+                    }
+                }
+                else
+                {
+                    steering_cmd_valid_count = 0U;
+                }
+            }
+
+            if (!steering_fb_zero_valid)
+            {
+                if (fb_left_mag_ok && fb_right_mag_ok)
+                {
+                    if (steering_fb_valid_count < 255U) steering_fb_valid_count++;
+                    if (steering_fb_valid_count >= AS5600_ZERO_STABLE_SAMPLES)
+                    {
+                        steering_fb_ref_deg = circular_mean_deg(fb_left_deg, fb_right_deg);
+                        steering_fb_zero_valid = 1U;
+                    }
+                }
+                else
+                {
+                    steering_fb_valid_count = 0U;
+                }
+            }
 
             last_tick_steering = now;
         }
@@ -797,63 +895,91 @@ int main(void)
         {
             const float dt = RATE_STEERING_CTRL_MS / 1000.0f;
 
-            if (steering_cmd_ref_deg < 0.0f)
-                steering_cmd_ref_deg = angle_wrap_360(steering_deg);
-
-            if (steering_fb_ref_deg < 0.0f)
-                steering_fb_ref_deg = circular_mean_deg(fb_left_deg, fb_right_deg);
-
-            float wheel_delta = angle_error_deg_fn(
-                                    angle_wrap_360(steering_deg),
-                                    steering_cmd_ref_deg);
-
-            steering_cmd_deg = clampf(
-                (wheel_delta / WHEEL_DEG_RANGE) * RUDDER_DEG_MAX,
-                RUDDER_DEG_MIN,
-                RUDDER_DEG_MAX);
-
-            float raw_fb = circular_mean_deg(fb_left_deg, fb_right_deg);
-
-            steering_fb_deg = clampf(
-                angle_error_deg_fn(raw_fb, steering_fb_ref_deg),
-                RUDDER_DEG_MIN,
-                RUDDER_DEG_MAX);
-
-            steering_error_deg = steering_cmd_deg - steering_fb_deg;
-
-            if (fabsf(steering_error_deg) < STEER_DEADBAND_DEG)
+            /* Inhibit control until all sensors are valid and zeros captured */
+            if (!(steering_mag_ok && fb_left_mag_ok && fb_right_mag_ok &&
+                  steering_cmd_zero_valid && steering_fb_zero_valid))
             {
-                steering_error_deg = 0.0f;
-                steer_pid.integral *= 0.90f;
+                stepper_stop();
+                stepper_right_stop();
+                steer_pid.integral   = 0.0f;
+                steer_pid.prev_error = 0.0f;
+                steering_error_deg   = 0.0f;
+                step_rate_cmd        = 0.0f;
 
-                /* Smooth ramp-down instead of hard stop */
-                steering_apply_output(0.0f);
-                steering_apply_output_right(0.0f);
+                static uint32_t last_invalid_print = 0;
+                if (now - last_invalid_print >= 200U)
+                {
+                    printf("WAIT CMD_OK=%u FB_L=%u FB_R=%u ZC=%u ZF=%u\r\n",
+                           steering_mag_ok,
+                           fb_left_mag_ok,
+                           fb_right_mag_ok,
+                           steering_cmd_zero_valid,
+                           steering_fb_zero_valid);
+                    last_invalid_print = now;
+                }
+
+                last_tick_steering_ctrl = now;
             }
             else
             {
-                step_rate_cmd = pid_update(&steer_pid, steering_error_deg, dt);
+                float wheel_delta;
+                float raw_fb;
 
-                if (fabsf(step_rate_cmd) < STEER_OUTPUT_FLOOR)
-                    step_rate_cmd = 0.0f;
+                wheel_delta = angle_error_deg_fn(
+                                  angle_wrap_360(steering_deg),
+                                  steering_cmd_ref_deg);
 
-                steering_apply_output(step_rate_cmd);
-                steering_apply_output_right(step_rate_cmd);
+                steering_cmd_deg = clampf(
+                    (wheel_delta / WHEEL_DEG_RANGE) * RUDDER_DEG_MAX,
+                    RUDDER_DEG_MIN,
+                    RUDDER_DEG_MAX);
+
+                raw_fb = circular_mean_deg(fb_left_deg, fb_right_deg);
+
+                steering_fb_deg = clampf(
+                    angle_error_deg_fn(raw_fb, steering_fb_ref_deg),
+                    RUDDER_DEG_MIN,
+                    RUDDER_DEG_MAX);
+
+                steering_error_deg = steering_cmd_deg - steering_fb_deg;
+
+                if (fabsf(steering_error_deg) < STEER_DEADBAND_DEG)
+                {
+                    steering_error_deg = 0.0f;
+                    steer_pid.integral *= 0.90f;
+
+                    /* Smooth ramp-down instead of hard stop */
+                    steering_apply_output(0.0f);
+                    steering_apply_output_right(0.0f);
+                }
+                else
+                {
+                    step_rate_cmd = pid_update(&steer_pid, steering_error_deg, dt);
+
+                    if (fabsf(step_rate_cmd) < STEER_OUTPUT_FLOOR)
+                        step_rate_cmd = 0.0f;
+
+                    steering_apply_output(step_rate_cmd);
+                    steering_apply_output_right(step_rate_cmd);
+                }
+
+                static uint32_t last_print = 0;
+                if (now - last_print >= 100U)
+                {
+                    printf("CMD=%.2f FB=%.2f ERR=%.2f RATE_L=%.1f RATE_R=%.1f MAG=%u%u%u\r\n",
+                           steering_cmd_deg,
+                           steering_fb_deg,
+                           steering_error_deg,
+                           step_rate_out_left,
+                           step_rate_out_right,
+                           steering_mag_ok,
+                           fb_left_mag_ok,
+                           fb_right_mag_ok);
+                    last_print = now;
+                }
+
+                last_tick_steering_ctrl = now;
             }
-
-            static uint32_t last_print = 0;
-            if (now - last_print >= 100U)
-            {
-                printf("CMD=%.2f FB=%.2f ERR=%.2f RATE_L=%.1f RATE_R=%.1f\r\n",
-                       steering_cmd_deg,
-                       steering_fb_deg,
-                       steering_error_deg,
-                       step_rate_out_left,
-                       step_rate_out_right);
-                last_print = now;
-            }
-
-            last_tick_steering_ctrl = now;
         }
 
         /* --- Throttle @ 50 Hz --- */
@@ -883,20 +1009,23 @@ int main(void)
             }
             else
             {
+                int i;
+                uint8_t motor_vibrationLeft_unsafe;
+
                 mean_x1 = 0.0f; mean_y1 = 0.0f; mean_z1 = 0.0f;
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_x1 += accel_x1[i];
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_y1 += accel_y1[i];
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_z1 += accel_z1[i];
+                for (i = 0; i < ADXL_SAMPLES; i++) mean_x1 += accel_x1[i];
+                for (i = 0; i < ADXL_SAMPLES; i++) mean_y1 += accel_y1[i];
+                for (i = 0; i < ADXL_SAMPLES; i++) mean_z1 += accel_z1[i];
                 mean_x1 /= ADXL_SAMPLES;
                 mean_y1 /= ADXL_SAMPLES;
                 mean_z1 /= ADXL_SAMPLES;
 
                 sum_x1 = 0.0f; sum_y1 = 0.0f; sum_z1 = 0.0f;
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_x1 += (accel_x1[i] - mean_x1) * (accel_x1[i] - mean_x1);
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_y1 += (accel_y1[i] - mean_y1) * (accel_y1[i] - mean_y1);
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_z1 += (accel_z1[i] - mean_z1) * (accel_z1[i] - mean_z1);
+                for (i = 0; i < ADXL_SAMPLES; i++) sum_x1 += (accel_x1[i] - mean_x1) * (accel_x1[i] - mean_x1);
+                for (i = 0; i < ADXL_SAMPLES; i++) sum_y1 += (accel_y1[i] - mean_y1) * (accel_y1[i] - mean_y1);
+                for (i = 0; i < ADXL_SAMPLES; i++) sum_z1 += (accel_z1[i] - mean_z1) * (accel_z1[i] - mean_z1);
 
-                uint8_t motor_vibrationLeft_unsafe =
+                motor_vibrationLeft_unsafe =
                     (sqrtf(sum_x1 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
                     (sqrtf(sum_y1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
                     (sqrtf(sum_z1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
@@ -929,20 +1058,23 @@ int main(void)
             }
             else
             {
+                int i;
+                uint8_t motor_vibrationRight_unsafe;
+
                 mean_x2 = 0.0f; mean_y2 = 0.0f; mean_z2 = 0.0f;
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_x2 += accel_x2[i];
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_y2 += accel_y2[i];
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_z2 += accel_z2[i];
+                for (i = 0; i < ADXL_SAMPLES; i++) mean_x2 += accel_x2[i];
+                for (i = 0; i < ADXL_SAMPLES; i++) mean_y2 += accel_y2[i];
+                for (i = 0; i < ADXL_SAMPLES; i++) mean_z2 += accel_z2[i];
                 mean_x2 /= ADXL_SAMPLES;
                 mean_y2 /= ADXL_SAMPLES;
                 mean_z2 /= ADXL_SAMPLES;
 
                 sum_x2 = 0.0f; sum_y2 = 0.0f; sum_z2 = 0.0f;
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_x2 += (accel_x2[i] - mean_x2) * (accel_x2[i] - mean_x2);
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_y2 += (accel_y2[i] - mean_y2) * (accel_y2[i] - mean_y2);
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_z2 += (accel_z2[i] - mean_z2) * (accel_z2[i] - mean_z2);
+                for (i = 0; i < ADXL_SAMPLES; i++) sum_x2 += (accel_x2[i] - mean_x2) * (accel_x2[i] - mean_x2);
+                for (i = 0; i < ADXL_SAMPLES; i++) sum_y2 += (accel_y2[i] - mean_y2) * (accel_y2[i] - mean_y2);
+                for (i = 0; i < ADXL_SAMPLES; i++) sum_z2 += (accel_z2[i] - mean_z2) * (accel_z2[i] - mean_z2);
 
-                uint8_t motor_vibrationRight_unsafe =
+                motor_vibrationRight_unsafe =
                     (sqrtf(sum_x2 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
                     (sqrtf(sum_y2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
                     (sqrtf(sum_z2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
@@ -960,10 +1092,11 @@ int main(void)
         /* --- Hall #1 @ 1000 Hz --- */
         if (now - last_tick_motor_rpmLeft >= RATE_MOTOR_RPM_MS)
         {
+            uint32_t time_since;
             current_time = __HAL_TIM_GET_COUNTER(&htim2);
-            uint32_t time_since = (current_time >= last_time_1)
-                                ? (current_time - last_time_1)
-                                : (0xFFFFFFFFU - last_time_1 + current_time);
+            time_since = (current_time >= last_time_1)
+                       ? (current_time - last_time_1)
+                       : (0xFFFFFFFFU - last_time_1 + current_time);
             if (time_since > RPM_TIMEOUT)
             {
                 rpm_1     = 0.0f;
@@ -976,10 +1109,11 @@ int main(void)
         /* --- Hall #2 @ 1000 Hz --- */
         if (now - last_tick_motor_rpmRight >= RATE_MOTOR_RPM_MS)
         {
+            uint32_t time_since;
             current_time = __HAL_TIM_GET_COUNTER(&htim2);
-            uint32_t time_since = (current_time >= last_time_2)
-                                ? (current_time - last_time_2)
-                                : (0xFFFFFFFFU - last_time_2 + current_time);
+            time_since = (current_time >= last_time_2)
+                       ? (current_time - last_time_2)
+                       : (0xFFFFFFFFU - last_time_2 + current_time);
             if (time_since > RPM_TIMEOUT)
             {
                 rpm_2     = 0.0f;
