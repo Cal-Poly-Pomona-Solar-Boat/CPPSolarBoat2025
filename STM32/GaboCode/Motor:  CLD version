@@ -14,6 +14,7 @@
 *   - Hall sensor #1 : motor RPM          (PA0, EXTI0)
 *   - Hall sensor #2 : motor RPM          (PA1, EXTI1)
 *   - Throttle : 0-5V mapping             (PC0, ADC1)
+*   - Zero steering button : PA10         (GPIO input, active high)
 *
 * Stepper outputs:
 *   Left  DM860I : TIM8  CH1 (PB6)  PUL | PB4 DIR | PB5 ENA
@@ -28,33 +29,6 @@
 *   ID 0x421  — motor_RpmRight        (Hall #2)    2 bytes   @1000 Hz
 *   ID 0x480  — motor_VibrationLeft   (ADXL345 #1) 1 byte    @ 100 Hz
 *   ID 0x481  — motor_VibrationRight  (ADXL345 #2) 1 byte    @ 100 Hz
-*
-* FIXES vs previous version:
-*   1. last_tick_steering_ctrl = now was outside the if-block (brace bug) — FIXED
-*   2. Steering command is now delta-from-boot-zero mapped to ±35 deg — FIXED
-*   3. Feedback polling rate changed to 2 ms to match control loop — FIXED
-*   4. PID anti-windup: zero-crossing integral reset + deadband bleed — FIXED
-*   5. STEP_RATE_MAX tuned for 70 deg travel in < 1 s at 1600 pulse/rev — FIXED
-*
-* FIXES from Sean's bench testing (Discord):
-*   6. PWM duty cycle corrected to 50% on both steppers — FIXED
-*      (was arr/10 = 10%; DM860I PUL input requires 50% duty for reliable detection)
-*   7. Enable signal now asserted BEFORE PWM starts, with 5 ms settle delay — FIXED
-*      (intermittent start failures caused by enable/pulse race condition)
-*   8. Trapezoidal ramp enforced at first-enable for both drivers — FIXED
-*      (instant jump to cruise frequency causes stall — must ramp up and ramp down)
-*   9. STEP_RATE_MAX raised to 40000 Hz — bench-verified on function generator — FIXED
-*  10. STEP_RATE_SLEW tuned to produce smooth trapezoidal ramp profile — FIXED
-*
-* THIS VERSION — motion control overhaul:
-*  11. Separate RAMP_UP_SLEW (800 Hz/tick) and RAMP_DOWN_SLEW (2000 Hz/tick) — FIXED
-*      Faster decel ensures motor stops sharply when steering magnet stops.
-*  12. Non-blocking direction-change sequence added — FIXED
-*      On sign reversal: ramp to DIR_CHANGE_RAMP_HZ, stop pulses, flip DIR,
-*      wait DIR_CHANGE_SETTLE_MS, then ramp up in new direction.
-*      Prevents stall on sharp reversals without any dead-stop in between.
-*  13. Deadband now calls ramp-down instead of hard stepper_stop() — FIXED
-*  14. PID gains retuned: Kp=800 scales output naturally to zero as error -> 0 — FIXED
 ******************************************************************************
 */
 /* USER CODE END Header */
@@ -66,6 +40,7 @@
 #include "string.h"
 #include "can_frames.h"
 #include "math.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private variables ---------------------------------------------------------*/
@@ -152,14 +127,14 @@ volatile uint8_t  rpm_2_buffer_index        = 0;
 FDCAN_FilterTypeDef sFilterConfig;
 
 /* --- Send-rate intervals (ms) --- */
-#define RATE_STEERING_MS              2U    // 500 Hz  — AS5600 #1 read
-#define RATE_STEPPER_FEEDBACK_MS      2U    // 500 Hz  — AS5600 #2 & #3 read (was 5, FIXED)
-#define RATE_THROTTLE_MS             20U    //  50 Hz
-#define RATE_MOTOR_VIBRATION_MS      10U    // 100 Hz
-#define RATE_MOTOR_RPM_MS             1U    //1000 Hz
+#define RATE_STEERING_MS              2U
+#define RATE_STEPPER_FEEDBACK_MS      2U
+#define RATE_THROTTLE_MS             20U
+#define RATE_MOTOR_VIBRATION_MS      10U
+#define RATE_MOTOR_RPM_MS             1U
 
 /* ADXL sample interval = vibration send-rate / number of samples */
-#define ADXL_SAMPLE_INTERVAL_MS  (RATE_MOTOR_VIBRATION_MS / ADXL_SAMPLES)  // 1 ms
+#define ADXL_SAMPLE_INTERVAL_MS  (RATE_MOTOR_VIBRATION_MS / ADXL_SAMPLES)
 
 /* --- Tick timestamps — one per frame --- */
 static uint32_t last_tick_steering              = 0;
@@ -172,142 +147,45 @@ static uint32_t last_tick_motor_rpmLeft         = 0;
 static uint32_t last_tick_motor_rpmRight        = 0;
 
 /* ================================================================
- * CLOSED-LOOP STEERING CONTROL
- * ================================================================
- *
- * Topology:
- *   AS5600 #1  (I2C3) — steering wheel, tracked as delta from boot zero
- *   AS5600 #2  (I2C4) — left  rudder actuator feedback
- *   AS5600 #3  (I2C2) — right rudder actuator feedback
- *
- * Physical limits:  rudder travel ±35 deg
- * Target:           full 70 deg sweep achievable in ≤ 1 second
- *
- * Pulse math (verify against your DM860I dip switch setting):
- *   Microstepping : 1600 pulse/rev  (SW5=on SW6=off SW7=on SW8=on)
- *   Gearbox       : 20:1
- *   Output deg/pulse = 360 / (1600 × 20) = 0.01125 deg
- *   Pulses for 70 deg = 70 / 0.01125 ≈ 6222 pulses
- *
- *   Sean bench-verified: 40 kHz pulse @ 50% duty = acceptable motor performance
- *   At STEP_RATE_MAX = 40000 Hz:
- *     Motor shaft RPM   = 40000 / 1600 × 60 = 1500 RPM
- *     Output shaft RPM  = 1500 / 20 = 75 RPM  (with 20:1 gearbox)
- *   For 250 RPM output: STEP_RATE_MAX = 250 × 20 × 1600 / 60 ≈ 133 333 Hz
- *     → verify this is within DM860I max input frequency before increasing
- *   STEP_RATE_SLEW = 1600 pulse/s per 2 ms tick → ~50 ms 0→40kHz ramp  ✓
+ * VELOCITY-BASED STEERING CONTROL
  * ================================================================ */
-
-#define RATE_STEERING_CTRL_MS    2U           // control loop period (ms)
-
-/* Timer clock — TIM8 and TIM15 both on APB2 = 170 MHz, prescaler 0 */
+#define RATE_STEERING_CTRL_MS    2U
 #define TIM8_CLK_HZ              170000000.0f
-
-/* ----------------------------------------------------------------
- * Step-rate limits & ramp parameters
- *
- *  STEP_RATE_MAX      : 40 kHz bench-verified (1600 step/rev x 20:1 = 75 RPM out)
- *  STEP_RATE_MIN      : below this ARR overflows the 16-bit timer
- *  RAMP_UP_SLEW       : Hz added per 2 ms control tick on acceleration
- *                       800 Hz/tick -> 0 to 40 kHz in 50 ticks (100 ms)
- *  RAMP_DOWN_SLEW     : Hz removed per 2 ms tick on deceleration
- *                       2000 Hz/tick -> 40 kHz to 0 in 20 ticks (40 ms)
- *                       Faster than ramp-up so the motor stops sharply
- *                       when the steering magnet stops moving.
- *
- * Direction-change sequence (DM860I requires DIR stable >= 5 us before pulse):
- *  DIR_CHANGE_RAMP_HZ   : ramp down to this speed before flipping DIR.
- *                         At ~5% of max speed the motor has low inertia
- *                         and the direction flip cannot stall it.
- *  DIR_CHANGE_SETTLE_MS : non-blocking settle window tracked by timestamp.
- *                         During this window pulses are suppressed so the
- *                         driver sees a clean DIR edge before the next step.
- * ---------------------------------------------------------------- */
 #define STEP_RATE_MAX            68000.0f
 #define STEP_RATE_MIN            200.0f
-#define RAMP_UP_SLEW             800.0f    /* Hz per 2 ms tick */
-#define RAMP_DOWN_SLEW           2000.0f   /* Hz per 2 ms tick */
-#define DIR_CHANGE_RAMP_HZ       2000.0f   /* slow to this before flipping DIR */
-#define DIR_CHANGE_SETTLE_MS     2U        /* ms to suppress pulses after DIR flip */
+#define RAMP_UP_SLEW             800.0f
+#define RAMP_DOWN_SLEW           2000.0f
+#define DIR_CHANGE_RAMP_HZ       2000.0f
+#define DIR_CHANGE_SETTLE_MS     2U
+#define STEPPER_ENABLE_SETTLE_MS 5U
 
-/* ENA settle time after asserting LOW before first pulse */
-#define STEPPER_ENABLE_SETTLE_MS  5U
+#define THROTTLE_MAP_DEG         35.0f
 
-/* Rudder physical travel limits */
-#define RUDDER_DEG_MAX           35.0f
-#define RUDDER_DEG_MIN          -35.0f
+#define RATE_SCALE               44444.0f
+#define STOP_THRESHOLD           0.3f
+#define STOP_COUNT               3U
+#define STEER_DIR_INVERT         0
 
-/*
- * WHEEL_DEG_RANGE — how many degrees the steering-wheel AS5600
- * physically rotates from centre to full lock (one side).
- * If wheel and rudder have identical travel, set this to 35.0f.
- * If wheel rotates ±90 deg for ±35 deg rudder, set to 90.0f.
- */
-#define WHEEL_DEG_RANGE          35.0f
-
-/* PID deadband and integral zone */
-#define STEER_DEADBAND_DEG       1.0f    /* inside this band -> hard zero command */
-#define STEER_INT_ZONE_DEG       5.0f
-
-/* PID gains
- * The PID output is in pulse/s (Hz) fed directly to the stepper driver.
- * Output range: -STEP_RATE_MAX to +STEP_RATE_MAX.
- *
- * Kp = 1200: at 35 deg (full lock) -> 42000 Hz (clamped to 40000)
- *            at  5 deg             ->  6000 Hz
- *            at  1 deg (deadband)  ->  1200 Hz -> ramps down and stops
- *            at  0.5 deg           ->   600 Hz -> below STEP_RATE_MIN -> zero
- * Ki = 10  : very light — only corrects steady-state offset, no windup
- * Kd = 5   : small damping, prevents oscillation near target
- *
- * STEER_OUTPUT_FLOOR: PID outputs below this are forced to 0.
- * This creates a natural stop zone just outside the deadband — the motor
- * slows proportionally and the output falls below the floor before the
- * deadband is reached, so the ramp-down completes smoothly.
- */
-#define STEER_KP                 1200.0f
-#define STEER_KI                 10.0f
-#define STEER_KD                 5.0f
-#define STEER_OUTPUT_FLOOR       STEP_RATE_MIN  /* outputs below this -> zero */
-
-typedef struct
-{
-    float kp, ki, kd;
-    float integral;
-    float prev_error;
-    float out_min, out_max;
-    float int_min, int_max;
-} PID_t;
-
-static PID_t steer_pid =
-{
-    .kp         = STEER_KP,
-    .ki         = STEER_KI,
-    .kd         = STEER_KD,
-    .integral   = 0.0f,
-    .prev_error = 0.0f,
-    .out_min    = -STEP_RATE_MAX,
-    .out_max    =  STEP_RATE_MAX,
-    .int_min    = -2000.0f,
-    .int_max    =  2000.0f
-};
+/* Throttle differential modulation via DAC */
+#define THROTTLE_OFFSET_MAX      0.20f
+#define THROTTLE_CENTRE_DB       2.0f
+#define DAC_FULL_SCALE           4095U
 
 static uint32_t last_tick_steering_ctrl = 0;
 
-/*
- * Zero-references captured once at boot.
- * -1.0f means "not yet captured".
- */
-static float steering_cmd_ref_deg = -1.0f;  // wheel  sensor zero
-static float steering_fb_ref_deg  = -1.0f;  // rudder sensor zero
+/* Velocity control state */
+static float    wheel_prev_deg      = -1.0f;
+static uint8_t  stop_ticks          = 0;
+static float    current_rate_hz     = 0.0f;
+static uint8_t  zero_steering_prev  = 0;
 
 /* Working variables */
-static float steering_cmd_deg    = 0.0f;    // desired rudder position (±35 deg)
-static float steering_fb_deg     = 0.0f;    // actual  rudder position (±35 deg)
-static float steering_error_deg  = 0.0f;
-static float step_rate_cmd       = 0.0f;
-static float step_rate_out       = 0.0f;    // left  driver slew state
-static float step_rate_out_right = 0.0f;    // right driver slew state
+static float steering_cmd_deg    = 0.0f;
+static float steering_fb_deg     = 0.0f;
+static float step_rate_out       = 0.0f;
+static float step_rate_out_right = 0.0f;
+static float throttle_left_frac  = 0.0f;
+static float throttle_right_frac = 0.0f;
 
 /* USER CODE END PV */
 
@@ -363,36 +241,6 @@ static float circular_mean_deg(float a_deg, float b_deg)
     return angle_wrap_360(atan2f(y, x) * 180.0f / (float)M_PI);
 }
 
-/*
- * PID update.
- * Includes:
- *   - Integral only accumulated inside STEER_INT_ZONE_DEG
- *   - Zero-crossing integral reset (anti-windup)
- *   - Integral bleed handled in the caller at the deadband
- */
-static float pid_update(PID_t *pid, float error, float dt)
-{
-    /* Zero-crossing reset prevents integrator from fighting direction changes */
-    if ((error > 0.0f && pid->prev_error < 0.0f) ||
-        (error < 0.0f && pid->prev_error > 0.0f))
-    {
-        pid->integral = 0.0f;
-    }
-
-    /* Only integrate near the target to prevent windup on large errors */
-    if (fabsf(error) < STEER_INT_ZONE_DEG)
-    {
-        pid->integral += error * pid->ki * dt;
-        pid->integral  = clampf(pid->integral, pid->int_min, pid->int_max);
-    }
-
-    float derivative = (error - pid->prev_error) / dt;
-    float output     = (pid->kp * error) + pid->integral + (pid->kd * derivative);
-    output = clampf(output, pid->out_min, pid->out_max);
-    pid->prev_error = error;
-    return output;
-}
-
 /* ---- ADC helper ---- */
 static uint16_t read_adc(void)
 {
@@ -405,21 +253,6 @@ static uint16_t read_adc(void)
 
 /* ================================================================
  * Left stepper  (TIM8 CH1 — PB6 PUL / PB4 DIR / PB5 ENA)
- *
- * steering_apply_output() implements a non-blocking trapezoidal
- * ramp with a safe direction-change sequence:
- *
- *  Normal running:
- *    speed tracks PID output via RAMP_UP_SLEW / RAMP_DOWN_SLEW.
- *
- *  Direction reversal detected (sign of cmd_hz flips):
- *    1. Decelerate to DIR_CHANGE_RAMP_HZ (still pulsing, old dir).
- *    2. Stop pulses (CCR=0), flip DIR pin.
- *    3. Wait DIR_CHANGE_SETTLE_MS (non-blocking timestamp gate).
- *    4. Re-enable pulses and accelerate in new direction.
- *
- *  Stop (|cmd| < STEP_RATE_MIN):
- *    Ramp down at RAMP_DOWN_SLEW, then CCR=0, ENA=HIGH.
  * ================================================================ */
 static void stepper_enable(uint8_t enable)
 {
@@ -446,43 +279,37 @@ static void stepper_set_rate(float rate_abs)
     if (arr < 100U)   arr = 100U;
     if (arr > 65535U) arr = 65535U;
     __HAL_TIM_SET_AUTORELOAD(&htim8, arr);
-    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, arr / 2U);  /* 50% duty */
+    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, arr / 2U);
     __HAL_TIM_SET_COUNTER(&htim8, 0);
 }
 
 static uint8_t  stepper_left_enabled  = 0;
-static float    stepper_left_speed    = 0.0f;  /* current magnitude (Hz), always >= 0 */
-static uint8_t  stepper_left_dir      = 1;     /* 1=positive, 0=negative */
-static uint8_t  stepper_left_dir_chg  = 0;     /* 1=direction change in progress */
-static uint32_t stepper_left_dir_tick = 0;     /* timestamp of DIR flip */
+static float    stepper_left_speed    = 0.0f;
+static uint8_t  stepper_left_dir      = 1;
+static uint8_t  stepper_left_dir_chg  = 0;
+static uint32_t stepper_left_dir_tick = 0;
 
 static void steering_apply_output(float cmd_hz)
 {
-    /* Desired direction from PID sign */
     uint8_t want_dir = (cmd_hz >= 0.0f) ? 1U : 0U;
     float   target   = fabsf(cmd_hz);
     if (target > STEP_RATE_MAX) target = STEP_RATE_MAX;
 
-    /* ---- Direction-change settle gate ---- */
     if (stepper_left_dir_chg)
     {
-        /* Pulses suppressed until settle window expires */
         if ((HAL_GetTick() - stepper_left_dir_tick) < DIR_CHANGE_SETTLE_MS)
         {
             __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
             return;
         }
-        /* Settle done — resume pulsing in new direction */
         stepper_left_dir_chg = 0;
-        stepper_left_speed   = STEP_RATE_MIN;   /* restart from min to ramp up */
+        stepper_left_speed   = STEP_RATE_MIN;
     }
 
-    /* ---- Direction reversal detection ---- */
     if (target >= STEP_RATE_MIN && want_dir != stepper_left_dir)
     {
         if (stepper_left_speed > DIR_CHANGE_RAMP_HZ)
         {
-            /* Still too fast — decelerate toward DIR_CHANGE_RAMP_HZ */
             stepper_left_speed -= RAMP_DOWN_SLEW;
             if (stepper_left_speed < DIR_CHANGE_RAMP_HZ)
                 stepper_left_speed = DIR_CHANGE_RAMP_HZ;
@@ -490,21 +317,19 @@ static void steering_apply_output(float cmd_hz)
             step_rate_out = stepper_left_dir ? stepper_left_speed : -stepper_left_speed;
             return;
         }
-        /* Slow enough — flip DIR now */
-        __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);   /* stop pulses */
-        stepper_left_dir     = want_dir;
+
+        __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+        stepper_left_dir      = want_dir;
         stepper_set_dir_pin(stepper_left_dir);
         stepper_left_dir_chg  = 1;
         stepper_left_dir_tick = HAL_GetTick();
         stepper_left_speed    = 0.0f;
-        step_rate_out = 0.0f;
+        step_rate_out         = 0.0f;
         return;
     }
 
-    /* ---- Normal ramp up / hold / ramp down ---- */
     if (target < STEP_RATE_MIN)
     {
-        /* Command is zero — ramp down and stop */
         if (stepper_left_speed > 0.0f)
         {
             stepper_left_speed -= RAMP_DOWN_SLEW;
@@ -544,7 +369,6 @@ static void steering_apply_output(float cmd_hz)
         }
     }
 
-    /* First pulse of a new move — enable driver with settle */
     if (!stepper_left_enabled)
     {
         stepper_set_dir_pin(stepper_left_dir);
@@ -559,7 +383,6 @@ static void steering_apply_output(float cmd_hz)
 
 /* ================================================================
  * Right stepper  (TIM15 CH2 — PB3 PUL / PB10 DIR / PC3 ENA)
- * Identical logic to left stepper — see comments above.
  * ================================================================ */
 static void stepper_right_enable(uint8_t enable)
 {
@@ -586,7 +409,7 @@ static void stepper_right_set_rate(float rate_abs)
     if (arr < 100U)   arr = 100U;
     if (arr > 65535U) arr = 65535U;
     __HAL_TIM_SET_AUTORELOAD(&htim15, arr);
-    __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, arr / 2U);  /* 50% duty */
+    __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, arr / 2U);
     __HAL_TIM_SET_COUNTER(&htim15, 0);
 }
 
@@ -602,7 +425,6 @@ static void steering_apply_output_right(float cmd_hz)
     float   target   = fabsf(cmd_hz);
     if (target > STEP_RATE_MAX) target = STEP_RATE_MAX;
 
-    /* ---- Direction-change settle gate ---- */
     if (stepper_right_dir_chg)
     {
         if ((HAL_GetTick() - stepper_right_dir_tick) < DIR_CHANGE_SETTLE_MS)
@@ -614,7 +436,6 @@ static void steering_apply_output_right(float cmd_hz)
         stepper_right_speed   = STEP_RATE_MIN;
     }
 
-    /* ---- Direction reversal detection ---- */
     if (target >= STEP_RATE_MIN && want_dir != stepper_right_dir)
     {
         if (stepper_right_speed > DIR_CHANGE_RAMP_HZ)
@@ -626,6 +447,7 @@ static void steering_apply_output_right(float cmd_hz)
             step_rate_out_right = stepper_right_dir ? stepper_right_speed : -stepper_right_speed;
             return;
         }
+
         __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
         stepper_right_dir      = want_dir;
         stepper_right_set_dir_pin(stepper_right_dir);
@@ -636,7 +458,6 @@ static void steering_apply_output_right(float cmd_hz)
         return;
     }
 
-    /* ---- Normal ramp up / hold / ramp down ---- */
     if (target < STEP_RATE_MIN)
     {
         if (stepper_right_speed > 0.0f)
@@ -747,18 +568,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
  */
 int main(void)
 {
-    /* USER CODE BEGIN 1 */
-    /* USER CODE END 1 */
-
     HAL_Init();
-
-    /* USER CODE BEGIN Init */
-    /* USER CODE END Init */
-
     SystemClock_Config();
-
-    /* USER CODE BEGIN SysInit */
-    /* USER CODE END SysInit */
 
     MX_GPIO_Init();
     MX_I2C3_Init();
@@ -773,35 +584,26 @@ int main(void)
 
     /* USER CODE BEGIN 2 */
 
-    /* --- Free-running microsecond timer for RPM --- */
     HAL_TIM_Base_Start(&htim2);
 
-    /* --- Left stepper PWM (TIM8 CH1 / PB6) ---
-     * Sean's fix #7: start with ENA de-asserted (HIGH = disabled).
-     * ENA will only be pulled LOW when a motion command actually arrives,
-     * followed by the STEPPER_ENABLE_SETTLE_MS delay. */
     HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
     __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
     stepper_enable(0);
     stepper_left_enabled = 0;
 
-    /* --- Right stepper PWM (TIM15 CH2 / PB3) --- */
     HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_2);
     __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, 0);
     stepper_right_enable(0);
     stepper_right_enabled = 0;
 
-    /* --- ADXL345 #1 init (I2C3, addr 0xA6) --- */
     HAL_I2C_Mem_Read (&hi2c3, 0xA6, 0x00, I2C_MEMADD_SIZE_8BIT, &adxl1_id,       1, HAL_MAX_DELAY);
     HAL_I2C_Mem_Write(&hi2c3, 0xA6, 0x2D, I2C_MEMADD_SIZE_8BIT, &adxl_power_ctl, 1, HAL_MAX_DELAY);
     HAL_I2C_Mem_Write(&hi2c3, 0xA6, 0x31, I2C_MEMADD_SIZE_8BIT, &adxl_power_ctl, 1, HAL_MAX_DELAY);
 
-    /* --- ADXL345 #2 init (I2C3, addr 0x3A) --- */
     HAL_I2C_Mem_Read (&hi2c3, 0x3A, 0x00, I2C_MEMADD_SIZE_8BIT, &adxl2_id,       1, HAL_MAX_DELAY);
     HAL_I2C_Mem_Write(&hi2c3, 0x3A, 0x2D, I2C_MEMADD_SIZE_8BIT, &adxl_power_ctl, 1, HAL_MAX_DELAY);
     HAL_I2C_Mem_Write(&hi2c3, 0x3A, 0x31, I2C_MEMADD_SIZE_8BIT, &adxl_power_ctl, 1, HAL_MAX_DELAY);
 
-    /* --- FDCAN filter: accept everything on FIFO0 --- */
     sFilterConfig.IdType       = FDCAN_STANDARD_ID;
     sFilterConfig.FilterIndex  = 0;
     sFilterConfig.FilterType   = FDCAN_FILTER_DUAL;
@@ -814,7 +616,6 @@ int main(void)
             FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE) != HAL_OK) Error_Handler();
     if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) Error_Handler();
 
-    /* --- UART console --- */
     BspCOMInit.BaudRate   = 115200;
     BspCOMInit.WordLength = COM_WORDLENGTH_8B;
     BspCOMInit.StopBits   = COM_STOPBITS_1;
@@ -824,16 +625,33 @@ int main(void)
 
     /* USER CODE END 2 */
 
-    /* ================================================================
-     * MAIN LOOP
-     * ================================================================ */
     while (1)
     {
         uint32_t now = HAL_GetTick();
 
         /* ----------------------------------------------------------
-         * AS5600 #1 — steering wheel (I2C3)  @ 500 Hz / 2 ms
+         * Zero steering button (PA10)
+         * Pressing button makes current steering angle the new zero
          * ---------------------------------------------------------- */
+        uint8_t zero_steering_now = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_10) == GPIO_PIN_SET) ? 1U : 0U;
+
+        if (zero_steering_now && !zero_steering_prev)
+        {
+            wheel_prev_deg   = steering_deg;
+            steering_cmd_deg = 0.0f;
+            steering_fb_deg  = 0.0f;
+            current_rate_hz  = 0.0f;
+            stop_ticks       = 0;
+
+            steering_apply_output(0.0f);
+            steering_apply_output_right(0.0f);
+
+            printf("ZERO_STEERING: new zero set at %.2f deg\r\n", steering_deg);
+        }
+
+        zero_steering_prev = zero_steering_now;
+
+        /* AS5600 #1 — steering wheel */
         if (now - last_tick_steering >= RATE_STEERING_MS)
         {
             if (HAL_I2C_Mem_Read(&hi2c3, 0x36 << 1, 0x0E,
@@ -844,13 +662,10 @@ int main(void)
                 steering_raw = ((uint16_t)steering_data[0] << 8) | steering_data[1];
                 steering_deg = (steering_raw * 360.0f) / 4096.0f;
             }
-            // can_tx_steering1(steering_deg);
             last_tick_steering = now;
         }
 
-        /* ----------------------------------------------------------
-         * AS5600 #2 — rudder left feedback (I2C4)  @ 500 Hz / 2 ms
-         * ---------------------------------------------------------- */
+        /* AS5600 #2 — rudder left feedback */
         if (now - last_tick_stepper_feedbackLeft >= RATE_STEPPER_FEEDBACK_MS)
         {
             if (HAL_I2C_Mem_Read(&hi2c4, 0x36 << 1, 0x0E,
@@ -861,13 +676,10 @@ int main(void)
                 stepper_feedbackLeft_raw = ((uint16_t)stepper_feedbackLeft_data[0] << 8) | stepper_feedbackLeft_data[1];
                 stepper_feedbackLeft_deg = (stepper_feedbackLeft_raw * 360.0f) / 4096.0f;
             }
-            // can_tx_steering2(stepper_feedbackLeft_deg);
             last_tick_stepper_feedbackLeft = now;
         }
 
-        /* ----------------------------------------------------------
-         * AS5600 #3 — rudder right feedback (I2C2)  @ 500 Hz / 2 ms
-         * ---------------------------------------------------------- */
+        /* AS5600 #3 — rudder right feedback */
         if (now - last_tick_stepper_feedbackRight >= RATE_STEPPER_FEEDBACK_MS)
         {
             if (HAL_I2C_Mem_Read(&hi2c2, 0x36 << 1, 0x0E,
@@ -878,137 +690,125 @@ int main(void)
                 stepper_feedbackRight_raw = ((uint16_t)stepper_feedbackRight_data[0] << 8) | stepper_feedbackRight_data[1];
                 stepper_feedbackRight_deg = (stepper_feedbackRight_raw * 360.0f) / 4096.0f;
             }
-            // can_tx_steering3(stepper_feedbackRight_deg);
             last_tick_stepper_feedbackRight = now;
         }
 
         /* ----------------------------------------------------------
-         * CLOSED-LOOP STEERING CONTROL  @ 500 Hz / 2 ms
-         *
-         * Step 1: Capture boot-zero for wheel and rudder sensors
-         *         on the very first pass so absolute sensor position
-         *         doesn't matter — only deltas are used.
-         *
-         * Step 2: Convert wheel delta → ±35 deg rudder command.
-         *
-         * Step 3: Convert rudder feedback delta → ±35 deg frame.
-         *
-         * Step 4: PID error → signed step-pulse rate → slew → DM860I.
+         * VELOCITY-BASED STEERING CONTROL
          * ---------------------------------------------------------- */
         if (now - last_tick_steering_ctrl >= RATE_STEERING_CTRL_MS)
         {
-            const float dt = RATE_STEERING_CTRL_MS / 1000.0f;  // 0.002 s
-
-            /* ---- Step 1: Zero-reference capture (runs once) ---- */
-            if (steering_cmd_ref_deg < 0.0f)
+            if (wheel_prev_deg < 0.0f)
             {
-                steering_cmd_ref_deg = angle_wrap_360(steering_deg);
-            }
-            if (steering_fb_ref_deg < 0.0f)
-            {
-                /* Record the sensor reading when rudders are at physical centre.
-                 * If rudders are guaranteed centred at power-on this is correct.
-                 * Otherwise add a physical calibration routine here. */
-                steering_fb_ref_deg = circular_mean_deg(stepper_feedbackLeft_deg,
-                                                        stepper_feedbackRight_deg);
-            }
-
-            /* ---- Step 2: Wheel delta → rudder setpoint (±35 deg) ---- */
-            /*
-             * angle_error_deg_fn returns the shortest signed angular distance,
-             * so it handles wrap-around (e.g. 359° → 1° = +2°, not -358°).
-             */
-            float wheel_delta = angle_error_deg_fn(
-                                    angle_wrap_360(steering_deg),
-                                    steering_cmd_ref_deg);
-
-            /*
-             * Scale wheel travel to rudder travel.
-             * If WHEEL_DEG_RANGE == RUDDER_DEG_MAX the mapping is 1:1.
-             * Clamp to physical rudder limits.
-             */
-            steering_cmd_deg = clampf(
-                (wheel_delta / WHEEL_DEG_RANGE) * RUDDER_DEG_MAX,
-                RUDDER_DEG_MIN,
-                RUDDER_DEG_MAX);
-
-            /* ---- Step 3: Rudder feedback → ±35 deg frame ---- */
-            float raw_fb = circular_mean_deg(stepper_feedbackLeft_deg,
-                                             stepper_feedbackRight_deg);
-            /*
-             * Delta from the boot-zero reference gives a signed position
-             * in the same ±35 deg frame as the command.
-             */
-            steering_fb_deg = clampf(
-                angle_error_deg_fn(raw_fb, steering_fb_ref_deg),
-                RUDDER_DEG_MIN,
-                RUDDER_DEG_MAX);
-
-            /* ---- Step 4: Error → PID → stepper rate ---- */
-            steering_error_deg = steering_cmd_deg - steering_fb_deg;
-
-            if (fabsf(steering_error_deg) < STEER_DEADBAND_DEG)
-            {
-                /*
-                 * Inside deadband — command zero to both drivers.
-                 * The ramp-down logic in steering_apply_output() will
-                 * decelerate the motors smoothly to a full stop.
-                 * Bleed the integrator so it doesn't fight the next move.
-                 */
-                steering_error_deg  = 0.0f;
-                steer_pid.integral *= 0.90f;
-                steering_apply_output(0.0f);
-                steering_apply_output_right(0.0f);
+                wheel_prev_deg = steering_deg;
+                last_tick_steering_ctrl = now;
             }
             else
             {
-                step_rate_cmd = pid_update(&steer_pid, steering_error_deg, dt);
+                float delta = steering_deg - wheel_prev_deg;
+                if (delta >  180.0f) delta -= 360.0f;
+                if (delta < -180.0f) delta += 360.0f;
+                wheel_prev_deg = steering_deg;
 
-                /*
-                 * Output floor: if the PID output magnitude is below
-                 * STEP_RATE_MIN the motor cannot meaningfully step at
-                 * that speed — clamp it to zero so the ramp-down fires
-                 * instead of leaving the motor spinning at a whisper speed.
-                 * This closes the gap between deadband and STEP_RATE_MIN.
-                 */
-                if (fabsf(step_rate_cmd) < STEER_OUTPUT_FLOOR)
-                    step_rate_cmd = 0.0f;
+                if (STEER_DIR_INVERT) delta = -delta;
 
-                steering_apply_output(step_rate_cmd);
-                steering_apply_output_right(step_rate_cmd);
+                if (fabsf(delta) < STOP_THRESHOLD)
+                {
+                    stop_ticks++;
+                    if (stop_ticks >= STOP_COUNT)
+                    {
+                        stop_ticks      = STOP_COUNT;
+                        current_rate_hz = 0.0f;
+                        steering_apply_output(0.0f);
+                        steering_apply_output_right(0.0f);
+                    }
+                }
+                else
+                {
+                    stop_ticks = 0;
+
+                    float rate_cmd = delta * RATE_SCALE;
+                    rate_cmd = clampf(rate_cmd, -STEP_RATE_MAX, STEP_RATE_MAX);
+
+                    if (fabsf(rate_cmd) < STEP_RATE_MIN)
+                        rate_cmd = 0.0f;
+
+                    current_rate_hz = rate_cmd;
+
+                    /* running relative steering estimate from new zero */
+                    steering_cmd_deg += delta;
+
+                    steering_apply_output(current_rate_hz);
+                    steering_apply_output_right(current_rate_hz);
+                }
+
+                /* --- Improved feedback display --- */
+
+                /* real rudder angle from both feedback sensors */
+                float rudder_angle = circular_mean_deg(stepper_feedbackLeft_deg,
+                                                       stepper_feedbackRight_deg);
+
+                /* make both relative to current zero (wheel_prev_deg) */
+                float wheel_rel  = angle_error_deg_fn(steering_deg, wheel_prev_deg);
+                float rudder_rel = angle_error_deg_fn(rudder_angle, wheel_prev_deg);
+
+                /* simple readable print */
+                static uint32_t last_ctrl_print = 0;
+                if (now - last_ctrl_print >= 100U)
+                {
+                    printf("WHEEL=%.1f | RUDDER=%.1f | CMD=%.1f | SPEED=%.0f\r\n",
+                           wheel_rel,
+                           rudder_rel,
+                           steering_cmd_deg,
+                           current_rate_hz);
+                    last_ctrl_print = now;
+                }
+
+                last_tick_steering_ctrl = now;
             }
-
-            /* ---- Debug print @ 10 Hz ---- */
-            static uint32_t last_ctrl_print = 0;
-            if (now - last_ctrl_print >= 100U)
-            {
-                printf("CMD=%.2f FB=%.2f ERR=%.2f RATE_L=%.1f RATE_R=%.1f\r\n",
-                       steering_cmd_deg,
-                       steering_fb_deg,
-                       steering_error_deg,
-                       step_rate_out,
-                       step_rate_out_right);
-                last_ctrl_print = now;
-            }
-
-            last_tick_steering_ctrl = now;  // FIX: was outside braces in original
         }
 
-        /* ----------------------------------------------------------
-         * Throttle (ADC1 / PC0)  @ 50 Hz / 20 ms
-         * ---------------------------------------------------------- */
+        /* THROTTLE + STEERING DIFFERENTIAL */
         if (now - last_tick_throttle >= RATE_THROTTLE_MS)
         {
             throttle_raw = read_adc();
             throttle_out = (throttle_raw * 3.3f) / 4096.0f;
-            // can_tx_throttle(throttle_out);
+
+            float base   = clampf((float)throttle_raw / 4095.0f, 0.0f, 1.0f);
+            float offset = THROTTLE_OFFSET_MAX *
+                           clampf(fabsf(steering_cmd_deg) / THROTTLE_MAP_DEG,
+                                  0.0f, 1.0f);
+
+            if (fabsf(steering_cmd_deg) <= THROTTLE_CENTRE_DB)
+            {
+                throttle_left_frac  = base;
+                throttle_right_frac = base;
+            }
+            else if (steering_cmd_deg > 0.0f)
+            {
+                throttle_left_frac  = base;
+                throttle_right_frac = base * (1.0f - offset);
+            }
+            else
+            {
+                throttle_left_frac  = base * (1.0f - offset);
+                throttle_right_frac = base;
+            }
+
+            throttle_left_frac  = clampf(throttle_left_frac,  0.0f, 1.0f);
+            throttle_right_frac = clampf(throttle_right_frac, 0.0f, 1.0f);
+
+            HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R,
+                             (uint32_t)(throttle_left_frac  * DAC_FULL_SCALE));
+            HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_2, DAC_ALIGN_12B_R,
+                             (uint32_t)(throttle_right_frac * DAC_FULL_SCALE));
+            HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
+            HAL_DAC_Start(&hdac1, DAC_CHANNEL_2);
+
             last_tick_throttle = now;
         }
 
-        /* ----------------------------------------------------------
-         * ADXL345 #1 — motor_VibrationLeft  @ 100 Hz / 10 ms
-         * Samples at 1 ms, accumulates 10 samples, sends once.
-         * ---------------------------------------------------------- */
+        /* ADXL345 #1 — motor_VibrationLeft */
         if (now - last_tick_motor_vibrationLeft >= ADXL_SAMPLE_INTERVAL_MS)
         {
             HAL_I2C_Mem_Read(&hi2c3, 0xA6, 0x32, I2C_MEMADD_SIZE_8BIT,
@@ -1044,7 +844,7 @@ int main(void)
                     (sqrtf(sum_y1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
                     (sqrtf(sum_z1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
 
-                // can_tx_adxl1(motor_vibrationLeft_unsafe);
+                (void)motor_vibrationLeft_unsafe;
 
                 adxl1_index = 0;
                 sum_x1 = 0.0f; sum_y1 = 0.0f; sum_z1 = 0.0f;
@@ -1053,9 +853,7 @@ int main(void)
             last_tick_motor_vibrationLeft = now;
         }
 
-        /* ----------------------------------------------------------
-         * ADXL345 #2 — motor_VibrationRight  @ 100 Hz / 10 ms
-         * ---------------------------------------------------------- */
+        /* ADXL345 #2 — motor_VibrationRight */
         if (now - last_tick_motor_vibrationRight >= ADXL_SAMPLE_INTERVAL_MS)
         {
             HAL_I2C_Mem_Read(&hi2c3, 0x3A, 0x32, I2C_MEMADD_SIZE_8BIT,
@@ -1091,7 +889,7 @@ int main(void)
                     (sqrtf(sum_y2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
                     (sqrtf(sum_z2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
 
-                // can_tx_adxl2(motor_vibrationRight_unsafe);
+                (void)motor_vibrationRight_unsafe;
 
                 adxl2_index = 0;
                 sum_x2 = 0.0f; sum_y2 = 0.0f; sum_z2 = 0.0f;
@@ -1100,9 +898,7 @@ int main(void)
             last_tick_motor_vibrationRight = now;
         }
 
-        /* ----------------------------------------------------------
-         * Hall #1 — motor_RpmLeft  @ 1000 Hz / 1 ms
-         * ---------------------------------------------------------- */
+        /* Hall #1 — motor_RpmLeft */
         if (now - last_tick_motor_rpmLeft >= RATE_MOTOR_RPM_MS)
         {
             current_time = __HAL_TIM_GET_COUNTER(&htim2);
@@ -1114,13 +910,10 @@ int main(void)
                 rpm_1     = 0.0f;
                 rpm_1_avg = 0.0f;
             }
-            // can_tx_rpm(rpm_1_avg);
             last_tick_motor_rpmLeft = now;
         }
 
-        /* ----------------------------------------------------------
-         * Hall #2 — motor_RpmRight  @ 1000 Hz / 1 ms
-         * ---------------------------------------------------------- */
+        /* Hall #2 — motor_RpmRight */
         if (now - last_tick_motor_rpmRight >= RATE_MOTOR_RPM_MS)
         {
             current_time = __HAL_TIM_GET_COUNTER(&htim2);
@@ -1132,7 +925,6 @@ int main(void)
                 rpm_2     = 0.0f;
                 rpm_2_avg = 0.0f;
             }
-            // can_tx_rpm2(rpm_2_avg);
             last_tick_motor_rpmRight = now;
         }
 
@@ -1141,7 +933,6 @@ int main(void)
 
 /* ================================================================
  * System Clock Configuration
- * HSE → PLL → 170 MHz SYSCLK
  * ================================================================ */
 void SystemClock_Config(void)
 {
@@ -1171,9 +962,8 @@ void SystemClock_Config(void)
 }
 
 /* ================================================================
- * Peripheral Init Functions (generated by CubeMX — do not modify)
+ * Peripheral Init Functions
  * ================================================================ */
-
 static void MX_ADC1_Init(void)
 {
     ADC_MultiModeTypeDef multimode = {0};
@@ -1306,9 +1096,9 @@ static void MX_TIM2_Init(void)
     TIM_MasterConfigTypeDef sMasterConfig     = {0};
 
     htim2.Instance               = TIM2;
-    htim2.Init.Prescaler         = 169;           // 170 MHz / 170 = 1 MHz tick
+    htim2.Init.Prescaler         = 169;
     htim2.Init.CounterMode       = TIM_COUNTERMODE_UP;
-    htim2.Init.Period            = 4294967295;     // full 32-bit range
+    htim2.Init.Period            = 4294967295;
     htim2.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
     htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
     if (HAL_TIM_Base_Init(&htim2) != HAL_OK) Error_Handler();
@@ -1449,6 +1239,12 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Pin  = GPIO_PIN_0 | GPIO_PIN_1;
     GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    /* PA10: Zero steering button input, active high */
+    GPIO_InitStruct.Pin  = GPIO_PIN_10;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     /* PB: Y2_AM, Y1_AM inputs */
