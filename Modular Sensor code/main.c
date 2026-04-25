@@ -158,6 +158,13 @@ int main(void) {
     VOLTS6, VOLTS7
     };
     const int N_VOLTS = (int)(sizeof(VOLTS) / sizeof(VOLTS[0])); 
+ 
+    //Initialize MPU filters.
+        mpu6050_attitude_filter_t att_filt;
+    int att_initialized = 0;
+
+    struct timespec prev_ts = {0};
+    clock_gettime(CLOCK_MONOTONIC, &prev_ts);
 
     // ---- Main loop ----
     const useconds_t loop_us = (useconds_t)(1000000.0 / LOOP_HZ);
@@ -167,6 +174,32 @@ int main(void) {
 
         mpu6050_sample_t s = {0};
         int imu_ok = (mpu6050_read_sample(imu_fd, &s) == 0);
+                double dt = 1.0 / LOOP_HZ;
+        mpu6050_attitude_t att = {0};
+
+        struct timespec now_ts;
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        dt = (double)(now_ts.tv_sec - prev_ts.tv_sec)
+           + (double)(now_ts.tv_nsec - prev_ts.tv_nsec) / 1e9;
+        prev_ts = now_ts;
+
+        if (dt <= 0.0) {
+            dt = 1.0 / LOOP_HZ;
+        }
+
+        if (imu_ok) {
+            if (!att_initialized) {
+                mpu6050_attitude_init(&att_filt, s.ax_g, s.ay_g, s.az_g);
+                att_initialized = 1;
+            }
+
+            att = mpu6050_get_attitude(
+                &att_filt,
+                s.ax_g, s.ay_g, s.az_g,
+                s.gx_dps, s.gy_dps,
+                dt
+            );
+        }
 
         printf("---- Sensors ----\n");
 
@@ -196,9 +229,11 @@ int main(void) {
             printf("IMU accel(g):   ax=%.3f ay=%.3f az=%.3f\n", s.ax_g, s.ay_g, s.az_g);
             printf("IMU gyro(dps):  gx=%.2f gy=%.2f gz=%.2f\n", s.gx_dps, s.gy_dps, s.gz_dps);
             printf("IMU temp(C):    %.2f\n", s.temp_c);
+            printf("IMU angles(deg): roll=%.2f pitch=%.2f\n", att.roll_deg, att.pitch_deg);
         } else {
             printf("IMU: read failed\n");
         }
+
         printf("\n");
 
         usleep(loop_us);
