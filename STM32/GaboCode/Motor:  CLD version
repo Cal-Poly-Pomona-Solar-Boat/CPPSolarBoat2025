@@ -1222,11 +1222,17 @@ static void MX_GPIO_Init(void)
     HAL_GPIO_WritePin(EN_R_GPIO_Port, EN_R_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOB, DIR_R_Pin | DIR_L_Pin | EN_L_Pin, GPIO_PIN_RESET);
 
-    /* PC: Y3_AM, Y4_AM inputs */
-    GPIO_InitStruct.Pin  = Y3_AM_Pin | Y4_AM_Pin;
+    /* PC: Y1_AM, Y2_AM, Y3_AM inputs */
+    GPIO_InitStruct.Pin = Y1_AM_Pin | Y2_AM_Pin | Y3_AM_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    /* PD: Y4_AM input */
+    GPIO_InitStruct.Pin = Y4_AM_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
     /* PC3: EN_R output */
     GPIO_InitStruct.Pin   = EN_R_Pin;
@@ -1247,11 +1253,7 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Pull = GPIO_PULLDOWN;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    /* PB: Y2_AM, Y1_AM inputs */
-    GPIO_InitStruct.Pin  = Y2_AM_Pin | Y1_AM_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
 
     /* PB: DIR_R, DIR_L, EN_L outputs */
     GPIO_InitStruct.Pin   = DIR_R_Pin | DIR_L_Pin | EN_L_Pin;
