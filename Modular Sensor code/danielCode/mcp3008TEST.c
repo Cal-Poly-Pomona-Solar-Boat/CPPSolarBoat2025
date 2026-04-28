@@ -1,4 +1,3 @@
-// main.c
 #include <stdio.h>
 #include <unistd.h>
 
@@ -35,27 +34,17 @@ int main(void) {
     };
 
     adc_input_t TRANS1 = { fd_adc1, 2 };
-    adc_input_t TRANS2 = { fd_adc1, 3 };
-    adc_input_t TRANS3 = { fd_adc1, 4 };
-
-    adc_input_t TRANS[] = { TRANS1, TRANS2, TRANS3 };
-    const int N_TRANS = (int)(sizeof(TRANS) / sizeof(TRANS[0]));
 
     const useconds_t loop_us = (useconds_t)(1000000.0 / LOOP_HZ);
 
     while (1) {
-        printf("---- TRANSDUCERS ----\n");
+        int adc = adc_read(&TRANS1);
+        double current = transducer_from_adc(adc, &icfg);
+        double eng = transducer_eng_from_ma(current, &icfg);
 
-        for (int i = 0; i < N_TRANS; i++) {
-            int adc = adc_read(&TRANS[i]);
-            double current = transducer_from_adc(adc, &icfg);
-            double eng = transducer_eng_from_ma(current, &icfg);
+        printf("TRANS01 | adc=%4d | mA=%6.2f | Eng=%6.2f\n",
+               adc, current, eng);
 
-            printf("TRANS%02d | adc=%4d | mA=%6.2f | Eng=%6.2f\n",
-                   i + 1, adc, current, eng);
-        }
-
-        printf("\n");
         usleep(loop_us);
     }
 
