@@ -1,5 +1,4 @@
 /* USER CODE BEGIN Header */
-/* Gabo and Nathan
 /**
 ******************************************************************************
 * @file           : main.c
@@ -90,6 +89,7 @@ float    sum_x1  = 0.0f, sum_y1  = 0.0f, sum_z1  = 0.0f;
 uint8_t  adxl_power_ctl = 0x08;
 float    adxl_cal_val   = 0.0039f;
 int      adxl1_index = 0;
+int		 adxl1_failed = 0;
 
 /* --- ADXL345 #2  motor_VibrationRight --- */
 uint8_t  adxl2_id;
@@ -99,6 +99,7 @@ float    accel_x2[10], accel_y2[10], accel_z2[10];
 float    mean_x2 = 0.0f, mean_y2 = 0.0f, mean_z2 = 0.0f;
 float    sum_x2  = 0.0f, sum_y2  = 0.0f, sum_z2  = 0.0f;
 int      adxl2_index = 0;
+int		 adxl2_failed = 0;
 
 /* --- Hall-effect #1  motor_RpmLeft --- */
 #define AVG_SAMPLES           5
@@ -171,6 +172,20 @@ static uint32_t last_tick_motor_rpmRight        = 0;
 #define THROTTLE_CENTRE_DB       2.0f
 #define DAC_FULL_SCALE           4095U
 
+/* Motor control loop */
+#define MAX_RPM             3000.0f //change later
+#define RUDDER_MAX_DEG      35.0f
+#define RUDDER_DEADBAND     2.0f
+#define MOTOR_GAIN          0.2f
+#define CMD_MIN             0.8f
+#define CMD_CENTER          1.0f
+#define CMD_MAX             1.2f
+#define RPM_DEADBAND        50.0f     // acceptable RPM error
+#define BIAS_GAIN           0.02f     // tune experimentally
+#define BIAS_MIN           -600.0f   // need to change this if max_rpm changes 20% of it
+#define BIAS_MAX            600.0f   // need to change this if max_rpm changes 20% of it
+#define BIAS_DELAY_MS       1000UL   // error must persist this long before bias accumulates
+
 static uint32_t last_tick_steering_ctrl = 0;
 
 /* Velocity control state */
@@ -186,6 +201,14 @@ static float step_rate_out       = 0.0f;
 static float step_rate_out_right = 0.0f;
 static float throttle_left_frac  = 0.0f;
 static float throttle_right_frac = 0.0f;
+
+static float    left_motor_bias         = 0.0f;
+static float    right_motor_bias        = 0.0f;
+static uint32_t left_error_onset_ms     = 0UL;  // tick when left error first exceeded deadband
+static uint32_t right_error_onset_ms    = 0UL;  // tick when right error first exceeded deadband
+static uint8_t  left_error_timing       = 0;    // 1 = timer is running, waiting for delay
+static uint8_t  right_error_timing      = 0;    // 1 = timer is running, waiting for delay
+
 
 /* USER CODE END PV */
 
@@ -250,6 +273,106 @@ static uint16_t read_adc(void)
     HAL_ADC_Stop(&hadc1);
     return v;
 }
+
+/* ---- Motor Mapping Function ---- */
+// motor mapping function
+void motor_map_from_rudder(float rudder_deg, float *left_cmd, float *right_cmd)
+{
+    if (fabsf(rudder_deg) < RUDDER_DEADBAND)
+    {
+        rudder_deg = 0.0f;
+    }
+    float r = rudder_deg / RUDDER_MAX_DEG;
+    r = clampf(r, -1.0f, 1.0f);
+    float ML = 1.0f + MOTOR_GAIN * r;
+    float MR = 1.0f - MOTOR_GAIN * r;
+    ML = clampf(ML, CMD_MIN, CMD_MAX);
+    MR = clampf(MR, CMD_MIN, CMD_MAX);
+    *left_cmd  = ML;
+    *right_cmd = MR;
+}
+
+void motor_control_loop(void)
+{
+    float ML = 1.0f;
+    float MR = 1.0f;
+
+    // 1. Convert throttle ADC to base RPM setpoint
+    float throttle_frac     = clampf((float)throttle_raw / 4095.0f, 0.0f, 1.0f);
+    float base_setpoint_rpm = throttle_frac * MAX_RPM;
+
+    // 2. Scale left and right motors based on steering/rudder angle
+    motor_map_from_rudder(steering_cmd_deg, &ML, &MR);
+
+    // 3. Apply steering scaling
+    float left_setpoint_rpm  = base_setpoint_rpm * ML;
+    float right_setpoint_rpm = base_setpoint_rpm * MR;
+
+    uint32_t now = HAL_GetTick();
+
+    // 4. Compare measured left RPM to desired left RPM
+    float left_error = left_setpoint_rpm - rpm_1_avg;
+    if (fabsf(left_error) > RPM_DEADBAND)
+    {
+        if (!left_error_timing)
+        {
+            // Error just became significant — start the timer
+            left_error_onset_ms = now;
+            left_error_timing   = 1;
+        }
+        else if ((now - left_error_onset_ms) >= BIAS_DELAY_MS)
+        {
+            // Error has been significant for long enough — accumulate bias
+            left_motor_bias += BIAS_GAIN * left_error;
+            left_motor_bias  = clampf(left_motor_bias, BIAS_MIN, BIAS_MAX);
+        }
+        // else: timer is running but delay not yet elapsed — do nothing
+    }
+    else
+    {
+        // Error is within deadband — reset timer so delay restarts on next exceedance
+        left_error_timing = 0;
+    }
+
+    // 5. Compare measured right RPM to desired right RPM
+    float right_error = right_setpoint_rpm - rpm_2_avg;
+    if (fabsf(right_error) > RPM_DEADBAND)
+    {
+        if (!right_error_timing)
+        {
+            // Error just became significant — start the timer
+            right_error_onset_ms = now;
+            right_error_timing   = 1;
+        }
+        else if ((now - right_error_onset_ms) >= BIAS_DELAY_MS)
+        {
+            // Error has been significant for long enough — accumulate bias
+            right_motor_bias += BIAS_GAIN * right_error;
+            right_motor_bias  = clampf(right_motor_bias, BIAS_MIN, BIAS_MAX);
+        }
+        // else: timer is running but delay not yet elapsed — do nothing
+    }
+    else
+    {
+        // Error is within deadband — reset timer so delay restarts on next exceedance
+        right_error_timing = 0;
+    }
+
+    float left_output  = (left_setpoint_rpm  + left_motor_bias)  / MAX_RPM;
+    float right_output = (right_setpoint_rpm + right_motor_bias) / MAX_RPM;
+    left_output  = clampf(left_output,  0.0f, 1.0f);
+    right_output = clampf(right_output, 0.0f, 1.0f);
+
+    // Send to DAC motor outputs
+    HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R,
+                     (uint32_t)(left_output  * DAC_FULL_SCALE));
+    HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_2, DAC_ALIGN_12B_R,
+                     (uint32_t)(right_output * DAC_FULL_SCALE));
+    HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
+    HAL_DAC_Start(&hdac1, DAC_CHANNEL_2);
+}
+
+
 
 /* ================================================================
  * Left stepper  (TIM8 CH1 — PB6 PUL / PB4 DIR / PB5 ENA)
@@ -654,13 +777,15 @@ int main(void)
         /* AS5600 #1 — steering wheel */
         if (now - last_tick_steering >= RATE_STEERING_MS)
         {
-            if (HAL_I2C_Mem_Read(&hi2c3, 0x36 << 1, 0x0E,
-                    I2C_MEMADD_SIZE_8BIT, &steering_data[0], 1, HAL_MAX_DELAY) == HAL_OK
-             && HAL_I2C_Mem_Read(&hi2c3, 0x36 << 1, 0x0F,
-                    I2C_MEMADD_SIZE_8BIT, &steering_data[1], 1, HAL_MAX_DELAY) == HAL_OK)
+            if (HAL_I2C_Mem_Read(&hi2c3, 0x36 << 1, 0x0E, I2C_MEMADD_SIZE_8BIT, steering_data, 2, HAL_MAX_DELAY) == HAL_OK)
             {
                 steering_raw = ((uint16_t)steering_data[0] << 8) | steering_data[1];
                 steering_deg = (steering_raw * 360.0f) / 4096.0f;
+            }
+            else
+            {
+            	printf("as5600#1 failed\r\n");
+            	// can update as5600#1 error code
             }
             last_tick_steering = now;
         }
@@ -668,13 +793,15 @@ int main(void)
         /* AS5600 #2 — rudder left feedback */
         if (now - last_tick_stepper_feedbackLeft >= RATE_STEPPER_FEEDBACK_MS)
         {
-            if (HAL_I2C_Mem_Read(&hi2c4, 0x36 << 1, 0x0E,
-                    I2C_MEMADD_SIZE_8BIT, &stepper_feedbackLeft_data[0], 1, HAL_MAX_DELAY) == HAL_OK
-             && HAL_I2C_Mem_Read(&hi2c4, 0x36 << 1, 0x0F,
-                    I2C_MEMADD_SIZE_8BIT, &stepper_feedbackLeft_data[1], 1, HAL_MAX_DELAY) == HAL_OK)
+            if (HAL_I2C_Mem_Read(&hi2c4, 0x36 << 1, 0x0E, I2C_MEMADD_SIZE_8BIT, stepper_feedbackLeft_data, 2, HAL_MAX_DELAY) == HAL_OK)
             {
                 stepper_feedbackLeft_raw = ((uint16_t)stepper_feedbackLeft_data[0] << 8) | stepper_feedbackLeft_data[1];
                 stepper_feedbackLeft_deg = (stepper_feedbackLeft_raw * 360.0f) / 4096.0f;
+            }
+            else
+            {
+            	printf("as5600#2 failed \r\n");
+            	// can update as5600#2 error code
             }
             last_tick_stepper_feedbackLeft = now;
         }
@@ -682,13 +809,15 @@ int main(void)
         /* AS5600 #3 — rudder right feedback */
         if (now - last_tick_stepper_feedbackRight >= RATE_STEPPER_FEEDBACK_MS)
         {
-            if (HAL_I2C_Mem_Read(&hi2c2, 0x36 << 1, 0x0E,
-                    I2C_MEMADD_SIZE_8BIT, &stepper_feedbackRight_data[0], 1, HAL_MAX_DELAY) == HAL_OK
-             && HAL_I2C_Mem_Read(&hi2c2, 0x36 << 1, 0x0F,
-                    I2C_MEMADD_SIZE_8BIT, &stepper_feedbackRight_data[1], 1, HAL_MAX_DELAY) == HAL_OK)
+            if (HAL_I2C_Mem_Read(&hi2c2, 0x36 << 1, 0x0E, I2C_MEMADD_SIZE_8BIT, stepper_feedbackRight_data, 2, HAL_MAX_DELAY) == HAL_OK)
             {
                 stepper_feedbackRight_raw = ((uint16_t)stepper_feedbackRight_data[0] << 8) | stepper_feedbackRight_data[1];
                 stepper_feedbackRight_deg = (stepper_feedbackRight_raw * 360.0f) / 4096.0f;
+            }
+            else
+            {
+            	printf("as5600#3 failed \r\n");
+            	// can update as5600#3 error code
             }
             last_tick_stepper_feedbackRight = now;
         }
@@ -811,44 +940,51 @@ int main(void)
         /* ADXL345 #1 — motor_VibrationLeft */
         if (now - last_tick_motor_vibrationLeft >= ADXL_SAMPLE_INTERVAL_MS)
         {
-            HAL_I2C_Mem_Read(&hi2c3, 0xA6, 0x32, I2C_MEMADD_SIZE_8BIT,
-                             adxl1_data, 6, HAL_MAX_DELAY);
-            ax1 = (int16_t)((adxl1_data[1] << 8) | adxl1_data[0]);
-            ay1 = (int16_t)((adxl1_data[3] << 8) | adxl1_data[2]);
-            az1 = (int16_t)((adxl1_data[5] << 8) | adxl1_data[4]);
-
-            if (adxl1_index < ADXL_SAMPLES)
+            if (HAL_I2C_Mem_Read(&hi2c3, 0xA6, 0x32, I2C_MEMADD_SIZE_8BIT, adxl1_data, 6, HAL_MAX_DELAY) == HAL_OK && !adxl1_failed)
             {
-                accel_x1[adxl1_index] = ax1 * adxl_cal_val;
-                accel_y1[adxl1_index] = ay1 * adxl_cal_val;
-                accel_z1[adxl1_index] = az1 * adxl_cal_val;
-                adxl1_index++;
+				ax1 = (int16_t)((adxl1_data[1] << 8) | adxl1_data[0]);
+				ay1 = (int16_t)((adxl1_data[3] << 8) | adxl1_data[2]);
+				az1 = (int16_t)((adxl1_data[5] << 8) | adxl1_data[4]);
+
+				if (adxl1_index < ADXL_SAMPLES)
+				{
+					accel_x1[adxl1_index] = ax1 * adxl_cal_val;
+					accel_y1[adxl1_index] = ay1 * adxl_cal_val;
+					accel_z1[adxl1_index] = az1 * adxl_cal_val;
+					adxl1_index++;
+				}
+				else
+				{
+					mean_x1 = 0.0f; mean_y1 = 0.0f; mean_z1 = 0.0f;
+					for (int i = 0; i < ADXL_SAMPLES; i++) mean_x1 += accel_x1[i];
+					for (int i = 0; i < ADXL_SAMPLES; i++) mean_y1 += accel_y1[i];
+					for (int i = 0; i < ADXL_SAMPLES; i++) mean_z1 += accel_z1[i];
+					mean_x1 /= ADXL_SAMPLES;
+					mean_y1 /= ADXL_SAMPLES;
+					mean_z1 /= ADXL_SAMPLES;
+
+					sum_x1 = 0.0f; sum_y1 = 0.0f; sum_z1 = 0.0f;
+					for (int i = 0; i < ADXL_SAMPLES; i++) sum_x1 += (accel_x1[i] - mean_x1) * (accel_x1[i] - mean_x1);
+					for (int i = 0; i < ADXL_SAMPLES; i++) sum_y1 += (accel_y1[i] - mean_y1) * (accel_y1[i] - mean_y1);
+					for (int i = 0; i < ADXL_SAMPLES; i++) sum_z1 += (accel_z1[i] - mean_z1) * (accel_z1[i] - mean_z1);
+
+					uint8_t motor_vibrationLeft_unsafe =
+						(sqrtf(sum_x1 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
+						(sqrtf(sum_y1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
+						(sqrtf(sum_z1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+
+					(void)motor_vibrationLeft_unsafe;
+
+					adxl1_index = 0;
+					sum_x1 = 0.0f; sum_y1 = 0.0f; sum_z1 = 0.0f;
+					mean_x1 = 0.0f; mean_y1 = 0.0f; mean_z1 = 0.0f;
+				}
             }
             else
             {
-                mean_x1 = 0.0f; mean_y1 = 0.0f; mean_z1 = 0.0f;
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_x1 += accel_x1[i];
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_y1 += accel_y1[i];
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_z1 += accel_z1[i];
-                mean_x1 /= ADXL_SAMPLES;
-                mean_y1 /= ADXL_SAMPLES;
-                mean_z1 /= ADXL_SAMPLES;
-
-                sum_x1 = 0.0f; sum_y1 = 0.0f; sum_z1 = 0.0f;
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_x1 += (accel_x1[i] - mean_x1) * (accel_x1[i] - mean_x1);
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_y1 += (accel_y1[i] - mean_y1) * (accel_y1[i] - mean_y1);
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_z1 += (accel_z1[i] - mean_z1) * (accel_z1[i] - mean_z1);
-
-                uint8_t motor_vibrationLeft_unsafe =
-                    (sqrtf(sum_x1 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
-                    (sqrtf(sum_y1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
-                    (sqrtf(sum_z1 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
-
-                (void)motor_vibrationLeft_unsafe;
-
-                adxl1_index = 0;
-                sum_x1 = 0.0f; sum_y1 = 0.0f; sum_z1 = 0.0f;
-                mean_x1 = 0.0f; mean_y1 = 0.0f; mean_z1 = 0.0f;
+            	printf("adxl1 failed\r\n");
+            	adxl1_failed = 1;
+            	// can update adxl1 error code
             }
             last_tick_motor_vibrationLeft = now;
         }
@@ -856,44 +992,51 @@ int main(void)
         /* ADXL345 #2 — motor_VibrationRight */
         if (now - last_tick_motor_vibrationRight >= ADXL_SAMPLE_INTERVAL_MS)
         {
-            HAL_I2C_Mem_Read(&hi2c3, 0x3A, 0x32, I2C_MEMADD_SIZE_8BIT,
-                             adxl2_data, 6, HAL_MAX_DELAY);
-            ax2 = (int16_t)((adxl2_data[1] << 8) | adxl2_data[0]);
-            ay2 = (int16_t)((adxl2_data[3] << 8) | adxl2_data[2]);
-            az2 = (int16_t)((adxl2_data[5] << 8) | adxl2_data[4]);
-
-            if (adxl2_index < ADXL_SAMPLES)
+            if (HAL_I2C_Mem_Read(&hi2c3, 0x3A, 0x32, I2C_MEMADD_SIZE_8BIT, adxl2_data, 6, HAL_MAX_DELAY) == HAL_OK && !adxl2_failed)
             {
-                accel_x2[adxl2_index] = ax2 * adxl_cal_val;
-                accel_y2[adxl2_index] = ay2 * adxl_cal_val;
-                accel_z2[adxl2_index] = az2 * adxl_cal_val;
-                adxl2_index++;
+				ax2 = (int16_t)((adxl2_data[1] << 8) | adxl2_data[0]);
+				ay2 = (int16_t)((adxl2_data[3] << 8) | adxl2_data[2]);
+				az2 = (int16_t)((adxl2_data[5] << 8) | adxl2_data[4]);
+
+				if (adxl2_index < ADXL_SAMPLES)
+				{
+					accel_x2[adxl2_index] = ax2 * adxl_cal_val;
+					accel_y2[adxl2_index] = ay2 * adxl_cal_val;
+					accel_z2[adxl2_index] = az2 * adxl_cal_val;
+					adxl2_index++;
+				}
+				else
+				{
+					mean_x2 = 0.0f; mean_y2 = 0.0f; mean_z2 = 0.0f;
+					for (int i = 0; i < ADXL_SAMPLES; i++) mean_x2 += accel_x2[i];
+					for (int i = 0; i < ADXL_SAMPLES; i++) mean_y2 += accel_y2[i];
+					for (int i = 0; i < ADXL_SAMPLES; i++) mean_z2 += accel_z2[i];
+					mean_x2 /= ADXL_SAMPLES;
+					mean_y2 /= ADXL_SAMPLES;
+					mean_z2 /= ADXL_SAMPLES;
+
+					sum_x2 = 0.0f; sum_y2 = 0.0f; sum_z2 = 0.0f;
+					for (int i = 0; i < ADXL_SAMPLES; i++) sum_x2 += (accel_x2[i] - mean_x2) * (accel_x2[i] - mean_x2);
+					for (int i = 0; i < ADXL_SAMPLES; i++) sum_y2 += (accel_y2[i] - mean_y2) * (accel_y2[i] - mean_y2);
+					for (int i = 0; i < ADXL_SAMPLES; i++) sum_z2 += (accel_z2[i] - mean_z2) * (accel_z2[i] - mean_z2);
+
+					uint8_t motor_vibrationRight_unsafe =
+						(sqrtf(sum_x2 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
+						(sqrtf(sum_y2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
+						(sqrtf(sum_z2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
+
+					(void)motor_vibrationRight_unsafe;
+
+					adxl2_index = 0;
+					sum_x2 = 0.0f; sum_y2 = 0.0f; sum_z2 = 0.0f;
+					mean_x2 = 0.0f; mean_y2 = 0.0f; mean_z2 = 0.0f;
+				}
             }
             else
             {
-                mean_x2 = 0.0f; mean_y2 = 0.0f; mean_z2 = 0.0f;
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_x2 += accel_x2[i];
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_y2 += accel_y2[i];
-                for (int i = 0; i < ADXL_SAMPLES; i++) mean_z2 += accel_z2[i];
-                mean_x2 /= ADXL_SAMPLES;
-                mean_y2 /= ADXL_SAMPLES;
-                mean_z2 /= ADXL_SAMPLES;
-
-                sum_x2 = 0.0f; sum_y2 = 0.0f; sum_z2 = 0.0f;
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_x2 += (accel_x2[i] - mean_x2) * (accel_x2[i] - mean_x2);
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_y2 += (accel_y2[i] - mean_y2) * (accel_y2[i] - mean_y2);
-                for (int i = 0; i < ADXL_SAMPLES; i++) sum_z2 += (accel_z2[i] - mean_z2) * (accel_z2[i] - mean_z2);
-
-                uint8_t motor_vibrationRight_unsafe =
-                    (sqrtf(sum_x2 / (float)ADXL_SAMPLES) > ADXL_THRESH_X) ||
-                    (sqrtf(sum_y2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Y) ||
-                    (sqrtf(sum_z2 / (float)ADXL_SAMPLES) > ADXL_THRESH_Z);
-
-                (void)motor_vibrationRight_unsafe;
-
-                adxl2_index = 0;
-                sum_x2 = 0.0f; sum_y2 = 0.0f; sum_z2 = 0.0f;
-                mean_x2 = 0.0f; mean_y2 = 0.0f; mean_z2 = 0.0f;
+            	printf("adxl2 failed\r\n");
+            	adxl2_failed = 1;
+            	// can update adxl2 error code
             }
             last_tick_motor_vibrationRight = now;
         }
@@ -927,7 +1070,8 @@ int main(void)
             }
             last_tick_motor_rpmRight = now;
         }
-
+        
+        motor_control_loop();
     } /* end while(1) */
 }
 
