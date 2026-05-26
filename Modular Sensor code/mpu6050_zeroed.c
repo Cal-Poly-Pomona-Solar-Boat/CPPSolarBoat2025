@@ -1,7 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
-#include "mpu6050_zeroed.h"
+#include "mpu6050_zerod.h"
 
 #include <stdint.h>
+#include <string.h>
 #include <math.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -16,6 +17,8 @@
 #define MPU_ADDR        0x68
 #define REG_PWR_MGMT_1  0x6B
 #define REG_ACCEL_XOUT  0x3B
+
+#define BUTTON_DEBOUNCE_MS 30   /* mechanical buttons typically bounce 5-20 ms */
 
 static KalmanFilter g_roll_kf;
 static KalmanFilter g_pitch_kf;
@@ -241,7 +244,9 @@ mpu6050_attitude_t mpu6050_get_attitude(mpu6050_attitude_filter_t *filters,
     return out;
 }
 
-/* Zeroed*/
+/* -----------------------------------------------------------------------------
+ * Zero / tare
+ * ---------------------------------------------------------------------------*/
 
 void mpu6050_zero_reset(mpu6050_zero_t *z) {
     if (!z) return;
@@ -265,4 +270,64 @@ mpu6050_attitude_t mpu6050_zero_apply(const mpu6050_zero_t *z,
         out.pitch_deg -= z->pitch_offset;
     }
     return out;
+}
+
+/* -----------------------------------------------------------------------------
+ * GPIO zero button (libgpiod)
+ * ---------------------------------------------------------------------------*/
+
+int mpu6050_button_open(mpu6050_button_t *b,
+                        const char *chip_name, unsigned line_num) {
+    if (!b || !chip_name) return -1;
+    memset(b, 0, sizeof(*b));
+
+    b->chip = gpiod_chip_open_by_name(chip_name);
+    if (!b->chip) return -1;
+
+    b->line = gpiod_chip_get_line(b->chip, line_num);
+    if (!b->line) {
+        gpiod_chip_close(b->chip);
+        b->chip = NULL;
+        return -1;
+    }
+
+    struct gpiod_line_request_config cfg = {
+        .consumer     = "mpu6050-zero",
+        .request_type = GPIOD_LINE_REQUEST_DIRECTION_INPUT,
+        .flags        = GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP,
+    };
+    if (gpiod_line_request(b->line, &cfg, 1) < 0) {
+        gpiod_chip_close(b->chip);
+        b->chip = NULL;
+        b->line = NULL;
+        return -1;
+    }
+
+    b->prev_state = 1;   /* released */
+    return 0;
+}
+
+void mpu6050_button_close(mpu6050_button_t *b) {
+    if (!b) return;
+    if (b->line) gpiod_line_release(b->line);
+    if (b->chip) gpiod_chip_close(b->chip);
+    b->line = NULL;
+    b->chip = NULL;
+}
+
+int mpu6050_button_pressed(mpu6050_button_t *b) {
+    if (!b || !b->line) return 0;
+
+    int v = gpiod_line_get_value(b->line);    /* 0 = pressed, 1 = released */
+    if (v < 0 || v == b->prev_state) return 0;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long ms = (now.tv_sec  - b->last_change.tv_sec ) * 1000L
+            + (now.tv_nsec - b->last_change.tv_nsec) / 1000000L;
+    if (ms < BUTTON_DEBOUNCE_MS) return 0;    /* still bouncing, ignore */
+
+    b->last_change = now;
+    b->prev_state  = v;
+    return (v == 0);                          /* falling edge = just pressed */
 }
