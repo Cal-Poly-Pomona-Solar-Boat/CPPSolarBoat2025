@@ -1,4 +1,4 @@
-// mpu6050.h
+// mpu6050_zeroed.h
 #pragma once
 
 #ifdef __cplusplus
