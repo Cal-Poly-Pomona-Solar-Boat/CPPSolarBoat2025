@@ -1,5 +1,8 @@
-// mpu6050_zeroed.h
+// mpu6050_zerod.h
 #pragma once
+
+#include <gpiod.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,12 +36,20 @@ typedef struct {
     double pitch_deg;
 } mpu6050_attitude_t;
 
-/* Zeroed before calcs run */
+/* Zero / tare offset, applied at the output of the attitude pipeline. */
 typedef struct {
     double roll_offset;
     double pitch_offset;
-    int    armed;   /* 0 until a zero has been captured */
+    int    armed;
 } mpu6050_zero_t;
+
+/* GPIO push-button (active-low w/ internal pull-up, debounced). */
+typedef struct {
+    struct gpiod_chip *chip;
+    struct gpiod_line *line;
+    int prev_state;
+    struct timespec last_change;
+} mpu6050_button_t;
 
 int  mpu6050_open(const char *i2cdev);
 void mpu6050_close(int fd);
@@ -79,10 +90,16 @@ mpu6050_attitude_t mpu6050_get_attitude(mpu6050_attitude_filter_t *filters,
                                         double gyro_x, double gyro_y,
                                         double dt);
 
-/* Zeroed*/
+/* Zero / tare API. */
 void               mpu6050_zero_reset  (mpu6050_zero_t *z);
 void               mpu6050_zero_capture(mpu6050_zero_t *z, mpu6050_attitude_t current);
 mpu6050_attitude_t mpu6050_zero_apply  (const mpu6050_zero_t *z, mpu6050_attitude_t raw);
+
+/* GPIO zero-button API. Call mpu6050_button_pressed() once per loop;
+ * returns 1 on a clean (debounced) press, 0 otherwise. */
+int  mpu6050_button_open   (mpu6050_button_t *b, const char *chip_name, unsigned line_num);
+void mpu6050_button_close  (mpu6050_button_t *b);
+int  mpu6050_button_pressed(mpu6050_button_t *b);
 
 #ifdef __cplusplus
 }
